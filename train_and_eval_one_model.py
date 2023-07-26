@@ -14,7 +14,7 @@ from torch.optim import lr_scheduler
 from torch.utils.data.sampler import WeightedRandomSampler
 
 from transformers import GPT2Tokenizer, GPT2LMHeadModel, AdamW, get_linear_schedule_with_warmup, get_cosine_schedule_with_warmup
-from accelerate import Accelerator
+# from accelerate import Accelerator
 
 import db_utils
 import eval_tools
@@ -117,8 +117,9 @@ def main(
         ckpt_dir="sys_ckpts",
     ):
     """Run one iteration of training and evaluation."""
-    accelerator = Accelerator()
-    device = accelerator.device
+    # accelerator = Accelerator()
+    # device = accelerator.device
+    device = "cuda"
 
     if not os.path.exists(ckpt_dir):
         os.makedirs(ckpt_dir, exist_ok=True)
@@ -219,20 +220,21 @@ def main(
         num_warmup_steps=500,
         num_training_steps=epochs * int(len(train_loader) // bs)
     )
-    model, optimizer, train_loader, test_loader, scheduler = accelerator.prepare(
-        model,
-        optimizer,
-        train_loader,
-        test_loader,
-        scheduler)
+    # model, optimizer, train_loader, test_loader, scheduler = accelerator.prepare(
+    #     model,
+    #     optimizer,
+    #     train_loader,
+    #     test_loader,
+    #     scheduler)
     # model, optimizer, train_loader, test_loader, orf_loader, crispr_loader, scheduler = accelerator.prepare(model, optimizer, train_loader, test_loader, orf_loader, crispr_loader, scheduler)
     model.to(device)
     avg_loss = torch.tensor(0).float().to(device)
 
-    accelerator.wait_for_everyone()
+    # accelerator.wait_for_everyone()
     for epoch in range(epochs):
         batch_losses = []
-        progress = tqdm(total=len(train_loader), desc="Training", disable=not accelerator.is_local_main_process)
+        # progress = tqdm(total=len(train_loader), desc="Training", disable=not accelerator.is_local_main_process)
+        progress = tqdm(total=len(train_loader), desc="Training")
         model.train()
         for batch_idx, batch in enumerate(train_loader):  # tqdm(enumerate(sample1_loader), total=len(sample1_loader), desc="Epoch"):            
             optimizer.zero_grad(set_to_none=True)
@@ -251,7 +253,8 @@ def main(
             loss = loss + bl + sl + wl
 
             # Optimize
-            accelerator.backward(loss)
+            # accelerator.backward(loss)
+            loss.backward()
             optimizer.step()
             scheduler.step()
             batch_losses.append(loss)
@@ -284,7 +287,7 @@ def main(
         epoch_loss = np.mean([x.item() for x in batch_losses])
         test_loss = np.mean([x.item() for x in test_losses])
         test_acc = np.mean([x.item() for x in test_accs]) * 100.
-        if accelerator.is_main_process:
+        if 1:  # accelerator.is_main_process:
             if test_loss < best_loss:
                 print("Saving best performing weights")
                 best_loss = test_loss
@@ -296,7 +299,7 @@ def main(
             progress.set_postfix({"epoch": epoch, "number_compounds": nc, "train_loss": epoch_loss, "test_loss": test_loss, "test_acc": test_acc, "best_test_acc": best_test_acc, "well_loss": wl, "batch_loss": bl, "source_loss": sl})
             progress.update()
         progress.close()
-        accelerator.wait_for_everyone()
+        # accelerator.wait_for_everyone()
     print('Finished training')
 
     # Load best weights
