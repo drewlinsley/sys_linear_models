@@ -241,6 +241,14 @@ def main(
         for batch_idx, batch in enumerate(train_loader):  # tqdm(enumerate(sample1_loader), total=len(sample1_loader), desc="Epoch"):            
             optimizer.zero_grad(set_to_none=True)
             dv, text_embeddings, iv_s, iv_b, iv_w = batch
+
+            # Move data to GPU. Only needed when we dont use accelerate
+            dv = dv.to(device)
+            text_embeddings = text_embeddings.to(device)
+            iv_s = iv_s.to(device)
+            iv_b = iv_b.to(device)
+            iv_w = iv_w.to(device)
+            #
             image_embeddings, b, s, w = model(dv=dv, iv_s=iv_s, iv_b=iv_b, iv_w=iv_w)
 
             # Make entropic targets
@@ -269,6 +277,14 @@ def main(
         with torch.no_grad():
             for batch_idx, batch in enumerate(test_loader):  # tqdm(enumerate(sample1_loader), total=len(sample1_loader), desc="Epoch"):
                 dv, text_embeddings, iv_s, iv_b, iv_w = batch
+
+                # Move data to GPU. Only needed when we dont use accelerate
+                image_embeddings = image_embeddings.to(device)
+                b = b.to(device)
+                s = s.to(device)
+                w = w.to(device)
+                #
+
                 image_embeddings, b, s, w = model(dv=dv, iv_s=iv_s, iv_b=iv_b, iv_w=iv_w)
                 # image_embeddings = model(dv=dv, iv_s=iv_s, iv_b=iv_b, iv_w=iv_w)
                 loss = nn.CrossEntropyLoss()(image_embeddings, text_embeddings)
