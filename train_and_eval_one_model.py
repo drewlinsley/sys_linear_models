@@ -192,12 +192,14 @@ def main(
         train_dataset,
         drop_last=True,
         batch_size=bs,
-        sampler=sampler)
+        sampler=sampler,
+        pin_memory=True)  # Remove pin memory if using accelerate
     test_loader = torch.utils.data.DataLoader(
         test_dataset,
         batch_size=34,
         drop_last=True,
-        shuffle=False)
+        shuffle=False,
+        pin_memory=True)
 
     # Build model etc
     model = Mmd_resnet(
