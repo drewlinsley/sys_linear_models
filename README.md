@@ -3,11 +3,8 @@ The goal of this repo is to systematically search through architecture, data, an
 
 # How to run
 
-0. Fill out the config.yaml file to specify general experimental settings.
 1. Create a database of hyperparameters `python generate_db.py`
-2. Launch workers with `bash launch_worker.sh`
-- Each worker runs `python run_single_job.py --read_db`
-- The same script can be used with custom parameters.
+2. Launch workers with `bash run_worker.sh`
 3. Pull db data down to plot and analyze it with `python analyze_db.py`.
 
 

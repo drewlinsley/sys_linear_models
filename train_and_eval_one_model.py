@@ -111,6 +111,7 @@ def main(
         finished=None,
 
         # Defaults below are fixed
+        test_epochs=100,
         version=24,
         final_data="/media/data/final_data.npz",
         ckpt_dir="sys_ckpts",
@@ -144,7 +145,7 @@ def main(
     output_dim = train_compounds.max() + 1
 
     # Counting variables for training
-    epochs = 2  # 2000
+    epochs = 2000
     best_loss = 10000000
     epoch_counter = 0
     balanced_loss = False
@@ -303,10 +304,10 @@ def main(
     model.eval()
 
     # Run MoA test
-    moa_perf = eval_tools.run(kind="moa", epochs=1)
+    moa_perf = eval_tools.run(kind="moa", epochs=test_epochs)
 
     # Run Target test
-    target_perf = eval_tools.run(kind="target", epochs=1)
+    target_perf = eval_tools.run(kind="target", epochs=test_epochs)
 
     # Update the DB with results
     results = {

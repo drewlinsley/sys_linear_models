@@ -5,5 +5,9 @@
 read -p "Which GPU: " GPU
 echo "You entered GPU: $GPU"
 
-CUDA_VISIBLE_DEVICES=$GPU accelerate launch train_and_eval_one_model.py
+while :
+do
+    # CUDA_VISIBLE_DEVICES=$GPU accelerate launch train_and_eval_one_model.py
+    CUDA_VISIBLE_DEVICES=$GPU python train_and_eval_one_model.py
+done
 
