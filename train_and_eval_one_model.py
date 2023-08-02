@@ -2,6 +2,7 @@ import os
 import sys
 import random
 import json
+import argparse
 
 import numpy as np
 import pandas as pd
@@ -127,6 +128,9 @@ def main(
         layers,
         width,
         batch_effect_correct,
+
+        # Choose to eval a pretrained model or not
+        ckpt=None,
 
         # These are not used but come from DB
         reserved=None,
@@ -277,53 +281,17 @@ def main(
     model.to(device)
     avg_loss = torch.tensor(0).float().to(device)
 
-    # accelerator.wait_for_everyone()
-    for epoch in range(epochs):
-        batch_losses = []
-        # progress = tqdm(total=len(train_loader), desc="Training", disable=not accelerator.is_local_main_process)
-        progress = tqdm(total=len(train_loader), desc="Training")
-        model.train()
-        for batch_idx, batch in enumerate(train_loader):  # tqdm(enumerate(sample1_loader), total=len(sample1_loader), desc="Epoch"):            
-            optimizer.zero_grad(set_to_none=True)
-            dv, text_embeddings, iv_s, iv_b, iv_w = batch
-
-            # Preprocess data for some model approaches
-            dv, text_embeddings = model_utils.preprocess(dv, text_embeddings, objective, label_prop)
-
-            # Move data to GPU. Only needed when we dont use accelerate
-            dv = dv.to(device)
-            text_embeddings = text_embeddings.to(device)
-            iv_s = iv_s.to(device)
-            iv_b = iv_b.to(device)
-            iv_w = iv_w.to(device)
-            #
-            image_embeddings, b, s, w = model(dv=dv, iv_s=iv_s, iv_b=iv_b, iv_w=iv_w)
-
-            # Make entropic targets
-            loss = obj_fun()(image_embeddings, text_embeddings)
-            if eb is None and batch_effect_correct:
-                eb = F.softmax(torch.ones_like(b), 1)
-                es = F.softmax(torch.ones_like(s), 1)
-                ew = F.softmax(torch.ones_like(w), 1)
-                bl = F.cross_entropy(b, eb)
-                sl = F.cross_entropy(s, es)
-                wl = F.cross_entropy(w, ew)
-                loss = loss + bl + sl + wl
-
-            # Optimize
-            # accelerator.backward(loss)
-            loss.backward()
-            optimizer.step()
-            scheduler.step()
-            batch_losses.append(loss)
-            progress.set_postfix({"train_loss": loss})  # , "compounds": comp_loss, "phenotypes": pheno_loss})
-            progress.update()
-
-        # Run test set
-        test_losses, test_accs = [], []
-        model.eval()
-        with torch.no_grad():
-            for batch_idx, batch in enumerate(test_loader):  # tqdm(enumerate(sample1_loader), total=len(sample1_loader), desc="Epoch"):
+    if ckpt is not None:
+        path = ckpt
+    else:
+        # accelerator.wait_for_everyone()
+        for epoch in range(epochs):
+            batch_losses = []
+            # progress = tqdm(total=len(train_loader), desc="Training", disable=not accelerator.is_local_main_process)
+            progress = tqdm(total=len(train_loader), desc="Training")
+            model.train()
+            for batch_idx, batch in enumerate(train_loader):  # tqdm(enumerate(sample1_loader), total=len(sample1_loader), desc="Epoch"):            
+                optimizer.zero_grad(set_to_none=True)
                 dv, text_embeddings, iv_s, iv_b, iv_w = batch
 
                 # Preprocess data for some model approaches
@@ -332,51 +300,91 @@ def main(
                 # Move data to GPU. Only needed when we dont use accelerate
                 dv = dv.to(device)
                 text_embeddings = text_embeddings.to(device)
-                iv_b = iv_b.to(device)
                 iv_s = iv_s.to(device)
+                iv_b = iv_b.to(device)
                 iv_w = iv_w.to(device)
                 #
-
                 image_embeddings, b, s, w = model(dv=dv, iv_s=iv_s, iv_b=iv_b, iv_w=iv_w)
-                # image_embeddings = model(dv=dv, iv_s=iv_s, iv_b=iv_b, iv_w=iv_w)
+
+                # Make entropic targets
                 loss = obj_fun()(image_embeddings, text_embeddings)
-                # Losses to become invariant to batch effects
-                # _, tk = torch.topk(image_embeddings, tops, dim=1)
-                # accuracy = (tk == text_embeddings[:, None]).sum(1).float().sum() / len(tk)
-                test_losses.append(loss)
-                # test_accs.append(accuracy)
+                if eb is None and batch_effect_correct:
+                    eb = F.softmax(torch.ones_like(b), 1)
+                    es = F.softmax(torch.ones_like(s), 1)
+                    ew = F.softmax(torch.ones_like(w), 1)
+                    bl = F.cross_entropy(b, eb)
+                    sl = F.cross_entropy(s, es)
+                    wl = F.cross_entropy(w, ew)
+                    loss = loss + bl + sl + wl
 
-        # Check performances
-        epoch_loss = np.mean([x.item() for x in batch_losses])
-        test_loss = np.mean([x.item() for x in test_losses])
-        test_acc = np.mean([x.item() for x in test_accs]) * 100.
-        if 1:  # accelerator.is_main_process:
-            if test_loss < best_loss:
-                print("Saving best performing weights")
-                best_loss = test_loss
-                # best_test_acc = test_acc
-                torch.save(model.state_dict(), path)
-                epoch_counter = 0
-            else:
-                if epoch > warmup_epochs:  # Start checking for early stopping
-                    epoch_counter += 1
-            # progress.set_postfix({"epoch": epoch, "number_compounds": nc, "train_loss": epoch_loss, "test_loss": test_loss, "test_acc": test_acc, "best_test_acc": best_test_acc, "well_loss": wl, "batch_loss": bl, "source_loss": sl})
-            progress.set_postfix({"epoch": epoch, "number_compounds": nc, "train_loss": epoch_loss, "test_loss": test_loss, "best_loss": best_loss})
-            progress.update()
-        progress.close()
-        # accelerator.wait_for_everyone()
+                # Optimize
+                # accelerator.backward(loss)
+                loss.backward()
+                optimizer.step()
+                scheduler.step()
+                batch_losses.append(loss)
+                progress.set_postfix({"train_loss": loss})  # , "compounds": comp_loss, "phenotypes": pheno_loss})
+                progress.update()
 
-        # Handle early stopping
-        if epoch_counter > stop_criterion:
-            print("Triggered early stopping.")
-            break  # Early stopping is initiated
-    print('Finished training')
+            # Run test set
+            test_losses, test_accs = [], []
+            model.eval()
+            with torch.no_grad():
+                for batch_idx, batch in enumerate(test_loader):  # tqdm(enumerate(sample1_loader), total=len(sample1_loader), desc="Epoch"):
+                    dv, text_embeddings, iv_s, iv_b, iv_w = batch
+
+                    # Preprocess data for some model approaches
+                    dv, text_embeddings = model_utils.preprocess(dv, text_embeddings, objective, label_prop)
+
+                    # Move data to GPU. Only needed when we dont use accelerate
+                    dv = dv.to(device)
+                    text_embeddings = text_embeddings.to(device)
+                    iv_b = iv_b.to(device)
+                    iv_s = iv_s.to(device)
+                    iv_w = iv_w.to(device)
+                    #
+
+                    image_embeddings, b, s, w = model(dv=dv, iv_s=iv_s, iv_b=iv_b, iv_w=iv_w)
+                    # image_embeddings = model(dv=dv, iv_s=iv_s, iv_b=iv_b, iv_w=iv_w)
+                    loss = obj_fun()(image_embeddings, text_embeddings)
+                    # Losses to become invariant to batch effects
+                    # _, tk = torch.topk(image_embeddings, tops, dim=1)
+                    # accuracy = (tk == text_embeddings[:, None]).sum(1).float().sum() / len(tk)
+                    test_losses.append(loss)
+                    # test_accs.append(accuracy)
+
+            # Check performances
+            epoch_loss = np.mean([x.item() for x in batch_losses])
+            test_loss = np.mean([x.item() for x in test_losses])
+            test_acc = np.mean([x.item() for x in test_accs]) * 100.
+            if 1:  # accelerator.is_main_process:
+                if test_loss < best_loss:
+                    print("Saving best performing weights")
+                    best_loss = test_loss
+                    # best_test_acc = test_acc
+                    torch.save(model.state_dict(), path)
+                    epoch_counter = 0
+                else:
+                    if epoch > warmup_epochs:  # Start checking for early stopping
+                        epoch_counter += 1
+                # progress.set_postfix({"epoch": epoch, "number_compounds": nc, "train_loss": epoch_loss, "test_loss": test_loss, "test_acc": test_acc, "best_test_acc": best_test_acc, "well_loss": wl, "batch_loss": bl, "source_loss": sl})
+                progress.set_postfix({"epoch": epoch, "number_compounds": nc, "train_loss": epoch_loss, "test_loss": test_loss, "best_loss": best_loss})
+                progress.update()
+            progress.close()
+            # accelerator.wait_for_everyone()
+
+            # Handle early stopping
+            if epoch_counter > stop_criterion:
+                print("Triggered early stopping.")
+                break  # Early stopping is initiated
+        print('Finished training')
 
     # Load best weights
     model.load_state_dict(torch.load(path))
     model.eval()
 
     # Encode training set
+    print('Begin evaluation')
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
         batch_size=bs,
@@ -456,28 +464,28 @@ def main(
     
     
 if __name__ == '__main__':
-    if len(sys.argv) > 1:
+    parser = argparse.ArgumentParser(description="Train and test one model.")
+    parser.add_argument('--debug', action='store_true')
+    parser.add_argument('--ckpt', type=str, default=None)
+    args = parser.parse_args()
+
+    if args.debug:
         # Run in debug mode
         params = {
             "id": -1,
-            "data_prop": 1,  # np.arange(0, 1.1, 0.1)[3],
-            "label_prop": 1,  # [0.1, 0.25, 0.5, 1.0][0],  # Proportion of labels, i.e. x% of molecules for labels
-            "objective": "mol_class",  # , "masked_recon"][1],  # ADD AN INTERPOLATION BETWEEN MOL_CLASS AND RECON
-            "lr": [1e-3, 1e-4][1],
+            "data_prop": np.arange(0, 1.1, 0.1)[-1],
+            "label_prop": [0.1, 0.25, 0.5, 1.0][0],  # Proportion of labels, i.e. x% of molecules for labels
+            "objective": ["mol_class", "masked_recon", "barlow"][0],
+            "lr": [1e-3, 1e-4][0],
             "bs": [10000][0],
             "moa": [True][0],
             "target": [True][0],
-            "layers": 6,  # [1, 3, 6, 12, 24][0],
-            "width": 1024,  # [64, 128, 512, 1024, 2048][0],
-            "batch_effect_correct": True,  # [True, False][1],
+            "layers": [1, 3, 6, 12, 24][0],
+            "width": [64, 128, 512, 1024, 2048][0],
+            "batch_effect_correct": [True, False][0],
         }
     else:
         # Run in DB mode
         params = db_utils.get_and_reserve_params()
-    pretty = json.dumps(params, indent=4, sort_keys=True)
-    if not len(pretty):
-        print("Finished experiments.")
-        os._exit(1)
-    print(pretty)
-    main(**params)
+    main(args.ckpt, **params)
 
