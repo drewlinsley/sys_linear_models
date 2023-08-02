@@ -1,6 +1,7 @@
 import os
 import sys
 import random
+import json
 
 import numpy as np
 import pandas as pd
@@ -17,7 +18,9 @@ from transformers import GPT2Tokenizer, GPT2LMHeadModel, AdamW, get_linear_sched
 # from accelerate import Accelerator
 
 import db_utils
+import model_utils
 import eval_tools
+from torchsampler import ImbalancedDatasetSampler
 
 from tqdm import tqdm as std_tqdm
 tqdm = partial(std_tqdm, dynamic_ncols=True)
@@ -37,20 +40,23 @@ class Mmd_resnet(nn.Module):
                  embedding_dim_s,
                  # embedding_dim_p,
                  embedding_dim_w,
+                 batch_effect_correct,
                  norm_type=nn.BatchNorm1d,  # nn.LayerNorm,  # torch.nn.Identity,  # torch.nn.BatchNorm1d,
                  use_dropout=0.1):
         super(Mmd_resnet, self).__init__()    
 
         self.n_blocks = n_blocks
+        self.batch_effect_correct = batch_effect_correct
 
         # Make IV and DV networks
-        self.embedding_s = nn.Sequential(*[
-            torch.nn.Embedding(
-                num_embeddings=num_embeddings_s,
-                embedding_dim=embedding_dim_s),
-            torch.nn.Linear(embedding_dim_s, embedding_dim_s),
-            norm_type(embedding_dim_s)
-        ])
+        if self.batch_effect_correct:
+            self.embedding_s = nn.Sequential(*[
+                torch.nn.Embedding(
+                    num_embeddings=num_embeddings_s,
+                    embedding_dim=embedding_dim_s),
+                torch.nn.Linear(embedding_dim_s, embedding_dim_s),
+                norm_type(embedding_dim_s)
+            ])
         self.proj = nn.Sequential(*[
             nn.Linear(input_dim, int_dim),
             norm_type(int_dim)
@@ -58,35 +64,51 @@ class Mmd_resnet(nn.Module):
 
         self.iv_layers, self.dv_layers = [], []
         for l in range(self.n_blocks):
-            self.dv_layers.append(nn.Sequential(*[
-                torch.nn.Linear(int_dim + embedding_dim_s, int_dim),
-                torch.nn.Dropout(use_dropout),
-                torch.nn.GELU(),
-                norm_type(int_dim),  # BatchNorm1d(dim),
-            ]))
+            if self.batch_effect_correct:
+                self.dv_layers.append(nn.Sequential(*[
+                    torch.nn.Linear(int_dim + embedding_dim_s, int_dim),
+                    torch.nn.Dropout(use_dropout),
+                    torch.nn.GELU(),
+                    norm_type(int_dim),  # BatchNorm1d(dim),
+                ]))
+            else:
+                self.dv_layers.append(nn.Sequential(*[
+                    torch.nn.Linear(int_dim, int_dim),
+                    torch.nn.Dropout(use_dropout),
+                    torch.nn.GELU(),
+                    norm_type(int_dim),  # BatchNorm1d(dim),
+                ]))
         self.dv_layers = nn.ModuleList(self.dv_layers)
         self.final = nn.Sequential(*[
             torch.nn.Linear(int_dim, output_dim)
         ])
-        self.b = nn.Linear(int_dim, num_embeddings_b)
-        self.s = nn.Linear(int_dim, num_embeddings_s)
-        self.w = nn.Linear(int_dim, num_embeddings_w)
+        if self.batch_effect_correct:
+            self.b = nn.Linear(int_dim, num_embeddings_b)
+            self.s = nn.Linear(int_dim, num_embeddings_s)
+            self.w = nn.Linear(int_dim, num_embeddings_w)
         
     def forward(self, dv, iv_s, iv_b, iv_w, return_p = False):
         """Forward function (with skip connections)"""
         y = self.proj(dv)
-        x_s = self.embedding_s(iv_s).squeeze(1)
+        if self.batch_effect_correct:
+            x_s = self.embedding_s(iv_s).squeeze(1)
         for l in range(self.n_blocks):
             dv_layer = self.dv_layers[l]
-            cat_y = torch.concat((y, x_s), 1)
-            if l % 2:
-                y = dv_layer(cat_y) + y
+            if self.batch_effect_correct:
+                cat_y = torch.concat((y, x_s), 1)
             else:
-                y = dv_layer(cat_y)  # Skip the nonlinear layer
+                cat_y = y
+            if l % 2:  # Skip
+                y = dv_layer(cat_y) + y
+            else:  # Dense
+                y = dv_layer(cat_y)
         out = self.final(y)
-        b = self.b(y)
-        s = self.s(y)
-        w = self.w(y)
+        if self.batch_effect_correct:
+            b = self.b(y)
+            s = self.s(y)
+            w = self.w(y)
+        else:
+            b, s, w = y, y, y
         if return_p:
             return out, y
         else:
@@ -111,10 +133,15 @@ def main(
         finished=None,
 
         # Defaults below are fixed
-        test_epochs=100,
+        epochs=1000,  # 500,
+        warmup_steps=50,
+        warmup_epochs=50,
+        early_stopping=True,
+        stop_criterion=16,
+        test_epochs=300,
         version=24,
         final_data="/media/data/final_data.npz",
-        ckpt_dir="sys_ckpts",
+        ckpt_dir="/media/data/sys_ckpts",
     ):
     """Run one iteration of training and evaluation."""
     # accelerator = Accelerator()
@@ -123,16 +150,26 @@ def main(
 
     if not os.path.exists(ckpt_dir):
         os.makedirs(ckpt_dir, exist_ok=True)
-    out_name = "data_{}_model_{}.pth".format(version, id)
+    out_name = "data_{}_model_{}_{}_{}_{}_{}.pth".format(version, id, data_prop, label_prop, width, layers)
     path = os.path.join(ckpt_dir, out_name)
 
     # Load data
     data = np.load(final_data)
     train_res, train_source, train_batch, train_well, train_compounds = data["train_res"], data["train_source"], data["train_batch"], data["train_well"], data["train_compounds"]
     test_res, test_source, test_batch, test_well, test_compounds = data["test_res"], data["test_source"], data["test_batch"], data["test_well"], data["test_compounds"]
-    orf_data, orf_source, orf_batch, orf_well = data["orf_data"], data["orf_source"], data["orf_batch"], data["orf_well"]
-    crispr_data, crispr_source, crispr_batch, crispr_well = data["orf_data"], data["orf_source"], data["orf_batch"], data["orf_well"]
-    res, orfs, crisprs = data["res"], data["orfs"], data["crisprs"]
+
+    # orf_data, orf_source, orf_batch, orf_well = data["orf_data"], data["orf_source"], data["orf_batch"], data["orf_well"]
+    # crispr_data, crispr_source, crispr_batch, crispr_well = data["orf_data"], data["orf_source"], data["orf_batch"], data["orf_well"]
+    # res, orfs, crisprs = data["res"], data["orfs"], data["crisprs"]
+    # res = data["res"]
+
+    # Handle label and data prop at the same time
+    train_compounds, train_res, train_source, train_batch, train_well = model_utils.prepare_labels(train_compounds, train_res, train_source, train_batch, train_well, objective, label_prop=label_prop, data_prop=data_prop, reference=test_compounds)
+    # test_compounds, test_res, test_source, test_batch, test_well = model_utils.prepare_labels(test_compounds, test_res, test_source, test_batch, test_well, objective, label_prop, reference=train_compounds)
+
+    # # Handle data prop - Always use full test set
+    # train_compounds, train_res, train_source, train_batch, train_well = model_utils.prepare_data(train_compounds, train_res, train_source, train_batch, train_well, data_prop)
+    bs = min(len(train_compounds), bs)  # Adjust so we dont overestimate batch
 
     # Default params
     emb_dim_b = 64
@@ -143,27 +180,30 @@ def main(
     num_embeddings_s = train_source.max() + 1  # train_source.shape[-1]
     num_embeddings_w = train_well.max() + 1  # train_well.shape[-1]
     input_dim = train_res.shape[-1]
-    output_dim = train_compounds.max() + 1
+    if objective == "mol_class":
+        output_dim = train_compounds.max() + 1
+    elif objective == "masked_recon":
+        output_dim = train_res.shape[1]
+    else:
+        raise NotImplementedError(objective)
 
     # Counting variables for training
-    epochs = 2000
     best_loss = 10000000
     epoch_counter = 0
     balanced_loss = False
-    int_dim = 1024  # 600 # input_dim + emb_dim
     best_test_acc = 0.
     eb = None
     teb = None
     tops = 10  # top-K classification accuracy
     nc = len(np.unique(train_compounds))
 
-    # Inverse weighting for sampling
-    uni_c, class_sample_count = np.unique(train_compounds, return_counts=True)
-    weight = 1. / class_sample_count
-    weight_dict = {k: v for k, v in zip(uni_c, weight)}
-    samples_weight = np.array([weight_dict[t] for t in train_compounds])
-    samples_weight = torch.from_numpy(samples_weight)
-    sampler = WeightedRandomSampler(samples_weight, len(samples_weight))
+    # # Inverse weighting for sampling
+    # uni_c, class_sample_count = np.unique(train_compounds, return_counts=True)
+    # weight = 1. / class_sample_count
+    # weight_dict = {k: v for k, v in zip(uni_c, weight)}
+    # samples_weight = np.array([weight_dict[t] for t in train_compounds])
+    # samples_weight = torch.from_numpy(samples_weight)
+    # sampler = WeightedRandomSampler(samples_weight, len(samples_weight))
 
     # Build data
     train_res = torch.Tensor(train_res).float()
@@ -188,6 +228,7 @@ def main(
         test_source,
         test_batch,
         test_well)
+    sampler = ImbalancedDatasetSampler(train_dataset)
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
         drop_last=True,
@@ -196,17 +237,18 @@ def main(
         pin_memory=True)  # Remove pin memory if using accelerate
     test_loader = torch.utils.data.DataLoader(
         test_dataset,
-        batch_size=34,
-        drop_last=True,
+        batch_size=len(test_dataset),
+        drop_last=False,
         shuffle=False,
-        pin_memory=True)
+        pin_memory=False)
 
     # Build model etc
     model = Mmd_resnet(
         input_dim,
-        int_dim,
+        width,
         output_dim,
         layers,
+        batch_effect_correct=batch_effect_correct,
         num_embeddings_b=num_embeddings_b,
         num_embeddings_s=num_embeddings_s,
         num_embeddings_w=num_embeddings_w,
@@ -219,9 +261,12 @@ def main(
         lr=lr)  # ,
     scheduler = get_cosine_schedule_with_warmup(  # get_linear_schedule_with_warmup(
         optimizer,
-        num_warmup_steps=500,
+        num_warmup_steps=warmup_steps,
         num_training_steps=epochs * int(len(train_loader) // bs)
     )
+
+    # Objective function
+    obj_fun = model_utils.get_obj_fun(objective)
     # model, optimizer, train_loader, test_loader, scheduler = accelerator.prepare(
     #     model,
     #     optimizer,
@@ -242,6 +287,9 @@ def main(
             optimizer.zero_grad(set_to_none=True)
             dv, text_embeddings, iv_s, iv_b, iv_w = batch
 
+            # Preprocess data for some model approaches
+            dv, text_embeddings = model_utils.preprocess(dv, text_embeddings, objective, label_prop)
+
             # Move data to GPU. Only needed when we dont use accelerate
             dv = dv.to(device)
             text_embeddings = text_embeddings.to(device)
@@ -252,15 +300,15 @@ def main(
             image_embeddings, b, s, w = model(dv=dv, iv_s=iv_s, iv_b=iv_b, iv_w=iv_w)
 
             # Make entropic targets
-            if eb is None:
+            loss = obj_fun()(image_embeddings, text_embeddings)
+            if eb is None and batch_effect_correct:
                 eb = F.softmax(torch.ones_like(b), 1)
                 es = F.softmax(torch.ones_like(s), 1)
                 ew = F.softmax(torch.ones_like(w), 1)
-            loss = nn.CrossEntropyLoss()(image_embeddings, text_embeddings)
-            bl = F.cross_entropy(b, eb)
-            sl = F.cross_entropy(s, es)
-            wl = F.cross_entropy(w, ew)
-            loss = loss + bl + sl + wl
+                bl = F.cross_entropy(b, eb)
+                sl = F.cross_entropy(s, es)
+                wl = F.cross_entropy(w, ew)
+                loss = loss + bl + sl + wl
 
             # Optimize
             # accelerator.backward(loss)
@@ -278,6 +326,9 @@ def main(
             for batch_idx, batch in enumerate(test_loader):  # tqdm(enumerate(sample1_loader), total=len(sample1_loader), desc="Epoch"):
                 dv, text_embeddings, iv_s, iv_b, iv_w = batch
 
+                # Preprocess data for some model approaches
+                dv, text_embeddings = model_utils.preprocess(dv, text_embeddings, objective, label_prop)
+
                 # Move data to GPU. Only needed when we dont use accelerate
                 dv = dv.to(device)
                 text_embeddings = text_embeddings.to(device)
@@ -288,19 +339,12 @@ def main(
 
                 image_embeddings, b, s, w = model(dv=dv, iv_s=iv_s, iv_b=iv_b, iv_w=iv_w)
                 # image_embeddings = model(dv=dv, iv_s=iv_s, iv_b=iv_b, iv_w=iv_w)
-                loss = nn.CrossEntropyLoss()(image_embeddings, text_embeddings)
+                loss = obj_fun()(image_embeddings, text_embeddings)
                 # Losses to become invariant to batch effects
-                if teb is None:
-                    teb = F.softmax(torch.ones_like(b), 1)
-                    tes = F.softmax(torch.ones_like(s) / len(s), 1)
-                    tew = F.softmax(torch.ones_like(w) / len(w), 1)
-                bl = (b.argmax(1) == iv_b).float().mean()  # F.cross_entropy(b, teb)
-                sl = (s.argmax(1) == iv_s).float().mean()  # F.cross_entropy(s, tes)
-                wl = (w.argmax(1) == iv_w).float().mean()  # F.cross_entropy(w, tew)
-                _, tk = torch.topk(image_embeddings, tops, dim=1)
-                accuracy = (tk == text_embeddings[:, None]).sum(1).float().sum() / len(tk)
+                # _, tk = torch.topk(image_embeddings, tops, dim=1)
+                # accuracy = (tk == text_embeddings[:, None]).sum(1).float().sum() / len(tk)
                 test_losses.append(loss)
-                test_accs.append(accuracy)
+                # test_accs.append(accuracy)
 
         # Check performances
         epoch_loss = np.mean([x.item() for x in batch_losses])
@@ -310,26 +354,87 @@ def main(
             if test_loss < best_loss:
                 print("Saving best performing weights")
                 best_loss = test_loss
-                best_test_acc = test_acc
+                # best_test_acc = test_acc
                 torch.save(model.state_dict(), path)
                 epoch_counter = 0
             else:
-                epoch_counter += 1
-            progress.set_postfix({"epoch": epoch, "number_compounds": nc, "train_loss": epoch_loss, "test_loss": test_loss, "test_acc": test_acc, "best_test_acc": best_test_acc, "well_loss": wl, "batch_loss": bl, "source_loss": sl})
+                if epoch > warmup_epochs:  # Start checking for early stopping
+                    epoch_counter += 1
+            # progress.set_postfix({"epoch": epoch, "number_compounds": nc, "train_loss": epoch_loss, "test_loss": test_loss, "test_acc": test_acc, "best_test_acc": best_test_acc, "well_loss": wl, "batch_loss": bl, "source_loss": sl})
+            progress.set_postfix({"epoch": epoch, "number_compounds": nc, "train_loss": epoch_loss, "test_loss": test_loss, "best_loss": best_loss})
             progress.update()
         progress.close()
         # accelerator.wait_for_everyone()
+
+        # Handle early stopping
+        if epoch_counter > stop_criterion:
+            print("Triggered early stopping.")
+            break  # Early stopping is initiated
     print('Finished training')
 
     # Load best weights
     model.load_state_dict(torch.load(path))
     model.eval()
 
+    # Encode training set
+    train_loader = torch.utils.data.DataLoader(
+        train_dataset,
+        batch_size=bs,
+        drop_last=False,
+        shuffle=False)
+    train_enc, train_lab = [], []
+    with torch.no_grad():
+        for batch_idx, batch in enumerate(train_loader):
+            dv, text_embeddings, iv_s, iv_b, iv_w = batch
+
+            # Preprocess data for some model approaches
+            dv, text_embeddings = model_utils.preprocess(dv, text_embeddings, objective, label_prop)
+
+            # Move data to GPU. Only needed when we dont use accelerate
+            dv = dv.to(device)
+            text_embeddings = text_embeddings.to(device)
+            iv_b = iv_b.to(device)
+            iv_s = iv_s.to(device)
+            iv_w = iv_w.to(device)
+
+            _, image_embeddings = model(dv=dv, iv_s=iv_s, iv_b=iv_b, iv_w=iv_w, return_p=True)
+            train_enc.append(image_embeddings)
+            train_lab.append(text_embeddings)
+    train_enc = torch.cat(train_enc).cpu().numpy()
+    train_lab = torch.cat(train_lab).cpu().numpy()
+
+    # Encode test set
+    test_loader = torch.utils.data.DataLoader(
+        test_dataset,
+        batch_size=bs,
+        drop_last=False,
+        shuffle=False)
+    test_enc, test_lab = [], []
+    with torch.no_grad():
+        for batch_idx, batch in enumerate(test_loader):
+            dv, text_embeddings, iv_s, iv_b, iv_w = batch
+
+            # Preprocess data for some model approaches
+            dv, text_embeddings = model_utils.preprocess(dv, text_embeddings, objective, label_prop)
+
+            # Move data to GPU. Only needed when we dont use accelerate
+            dv = dv.to(device)
+            text_embeddings = text_embeddings.to(device)
+            iv_b = iv_b.to(device)
+            iv_s = iv_s.to(device)
+            iv_w = iv_w.to(device)
+
+            _, image_embeddings = model(dv=dv, iv_s=iv_s, iv_b=iv_b, iv_w=iv_w, return_p=True)
+            test_enc.append(image_embeddings)
+            test_lab.append(text_embeddings)
+    test_enc = torch.cat(test_enc).cpu().numpy()  # Slow but convenient. Consider removing.
+    test_lab = torch.cat(test_lab).cpu().numpy()
+
     # Run MoA test
-    moa_perf = eval_tools.run(kind="moa", epochs=test_epochs)
+    moa_perf = eval_tools.run(kind="moa", train_X=train_enc, train_y=train_lab, test_X=test_enc, test_y=test_lab, device=device, epochs=test_epochs, width=width)
 
     # Run Target test
-    target_perf = eval_tools.run(kind="target", epochs=test_epochs)
+    target_perf = eval_tools.run(kind="target", train_X=train_enc, train_y=train_lab, test_X=test_enc, test_y=test_lab, device=device, epochs=test_epochs, width=width)
 
     # Update the DB with results
     results = {
@@ -344,6 +449,10 @@ def main(
         "target_loss_std": target_perf["loss_std"],
     }
     db_utils.record_performance(results)
+
+    # Clean up weights
+    os.remove(path)
+    print("Finished")
     
     
 if __name__ == '__main__':
@@ -351,19 +460,24 @@ if __name__ == '__main__':
         # Run in debug mode
         params = {
             "id": -1,
-            "data_prop": np.arange(0, 1.1, 0.1)[-1],
-            "label_prop": [0.1, 0.25, 0.5, 1.0][0],  # Proportion of labels, i.e. x% of molecules for labels
-            "objective": ["mol_class", "masked_recon", "barlow"][0],
-            "lr": [1e-3, 1e-4][0],
+            "data_prop": 1,  # np.arange(0, 1.1, 0.1)[3],
+            "label_prop": 1,  # [0.1, 0.25, 0.5, 1.0][0],  # Proportion of labels, i.e. x% of molecules for labels
+            "objective": "mol_class",  # , "masked_recon"][1],  # ADD AN INTERPOLATION BETWEEN MOL_CLASS AND RECON
+            "lr": [1e-3, 1e-4][1],
             "bs": [10000][0],
             "moa": [True][0],
             "target": [True][0],
-            "layers": [1, 3, 6, 12, 24][0],
-            "width": [64, 128, 512, 1024, 2048][0],
-            "batch_effect_correct": [True, False][0],
+            "layers": 6,  # [1, 3, 6, 12, 24][0],
+            "width": 1024,  # [64, 128, 512, 1024, 2048][0],
+            "batch_effect_correct": True,  # [True, False][1],
         }
     else:
         # Run in DB mode
         params = db_utils.get_and_reserve_params()
+    pretty = json.dumps(params, indent=4, sort_keys=True)
+    if not len(pretty):
+        print("Finished experiments.")
+        os._exit(1)
+    print(pretty)
     main(**params)
 

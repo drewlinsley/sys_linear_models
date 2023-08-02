@@ -105,6 +105,7 @@ def main():
     train_key, test_key = [], []
     train_inchi, test_inchi = [], []
     train_smile, test_smile = [], []
+    compound_moa_remap = {}
     for i, t in tqdm(enumerate(umoas), total=umoa_len, desc="MoAs"):
         ikeys = df_comb[moas == t].inchi_key.values
         idx = np.in1d(keys, ikeys)
@@ -112,6 +113,8 @@ def main():
         cont_act = control_data[idx]
         ikeys = keys[idx]
         iinchi = inchis[idx]
+        if t not in compound_moa_remap:
+            compound_moa_remap[comps[idx][0]] = t
         ismile = smiles[idx]
         train_X.append(act[:-1])
         cont_train_X.append(cont_act[:-1])
@@ -146,9 +149,10 @@ def main():
     # Remap Y down to the minimal # of cats
     uni_cats = np.unique(train_y)
     y_names = train_y.copy()
-    remap = {c: idx for idx, c in enumerate(uni_cats)}
-    train_y = np.asarray([remap[x] for x in train_y])
-    test_y = np.asarray([remap[x] for x in test_y])
+    moa_id_remap = {c: idx for idx, c in enumerate(uni_cats)}
+
+    train_y = np.asarray([moa_id_remap[x] for x in train_y])
+    test_y = np.asarray([moa_id_remap[x] for x in test_y])
 
     # Save metadata
     np.savez(
@@ -157,6 +161,8 @@ def main():
         train_y=train_y,
         test_X=test_X,
         test_y=test_y,
+        id_remap=moa_id_remap,
+        compound_remap=compound_moa_remap,
         inchi_names=np.unique(train_inchi))
     print("Finished MoA data")
 

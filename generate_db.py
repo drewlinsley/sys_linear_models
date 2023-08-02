@@ -45,15 +45,15 @@ def get_all_combinations(exps):
 
 
 exps = {
-    "data_prop": np.arange(0, 1.1, 0.1),
-    "label_prop": [0.1, 0.25, 0.5, 1.0],  # Proportion of labels, i.e. x% of molecules for labels
-    "objective": ["mol_class", "masked_recon", "barlow"],
+    "data_prop": [0.5, 1.],  # [0.1, 0.2, 0.4, 0.6, 0.8, 1.],  # np.arange(0, 1.1, 0.1),
+    "label_prop": [0.5, 1.],  # [0.1, 0.2, 0.4, 0.6, 0.8, 1.],  # np.arange(0, 1.1, 0.1),  # Proportion of labels, i.e. x% of molecules for labels
+    "objective": ["mol_class", "masked_recon"],
     "lr": [1e-3, 1e-4],
-    "bs": [10000],
+    "bs": [5000],
     "moa": [True],
     "target": [True],
-    "layers": [1, 3, 6, 12, 24],
-    "width": [64, 128, 512, 1024, 2048],
+    "layers": [1, 3, 6],  # [1, 3, 6, 12],
+    "width": [256, 512, 768],  # [256, 512, 768, 1024],
     "batch_effect_correct": [True, False],
 }
 
@@ -82,8 +82,8 @@ for idx, combo in tqdm(enumerate(combinations), total=len(combinations), desc="P
     cur.execute(query, vals)
 con.commit()
 
-res = cur.execute("SELECT * from metadata")
-print(res.fetchall())
+# res = cur.execute("SELECT * from metadata")
+# print(res.fetchall())
 con.close()
 print("Successfully created DB.")
 
