@@ -44,46 +44,60 @@ def get_all_combinations(exps):
     return combinations
 
 
-exps = {
-    "data_prop": [0.5, 1.],  # [0.1, 0.2, 0.4, 0.6, 0.8, 1.],  # np.arange(0, 1.1, 0.1),
-    "label_prop": [0.5, 1.],  # [0.1, 0.2, 0.4, 0.6, 0.8, 1.],  # np.arange(0, 1.1, 0.1),  # Proportion of labels, i.e. x% of molecules for labels
-    "objective": ["mol_class", "masked_recon"],
-    "lr": [1e-3],  # , 1e-4],
-    "bs": [10000],
-    "moa": [True],
-    "target": [True],
-    "layers": [6],  # [1, 3, 6],  # [1, 3, 6, 12],
-    "width": [1024],  # [256, 512, 768],  # [256, 512, 768, 1024],
-    "batch_effect_correct": [True],  # , False],
-}
+def main(exps, recreate):
+    """Create and fill a DB with experiments."""
 
-combinations = get_all_combinations(exps)
-print("Derived {} combinations.".format(len(combinations)))
+    combinations = get_all_combinations(exps)
+    print("Derived {} combinations.".format(len(combinations)))
 
-# Create a DB
-cfg = DBInfo()
-db_name = cfg.db_name  # "chem_exps"
-con = psycopg.connect(dbname=db_name, autocommit=True)
-cur = con.cursor()
-cur.execute("DROP TABLE IF EXISTS metadata")
-cur.execute("CREATE TABLE metadata(id SERIAL PRIMARY KEY, reserved boolean, finished boolean, data_prop float, label_prop float, objective varchar, lr float, bs int, moa boolean, target boolean, layers int, width int, batch_effect_correct boolean)")
-cur.execute("DROP TABLE IF EXISTS results")
-cur.execute("CREATE TABLE results(id SERIAL PRIMARY KEY, meta_id int, moa_acc float, moa_loss float, moa_acc_std float, moa_loss_std float, target_acc float, target_loss float, target_acc_std float, target_loss_std float)")
-for idx, combo in tqdm(enumerate(combinations), total=len(combinations), desc="Preparing inserts"):
-    cols = [x for x in combo.keys()]
-    vals = [x for x in combo.values()]
-    cols = ["reserved", "finished"] + cols
-    # vals = [idx, False, False] + vals
-    vals = [False, False] + vals
-    # cols = tuple(cols)
-    # vals = tuple(vals)
-    query = """INSERT INTO metadata(%s) VALUES(%%s, %%s, %%s, %%s, %%s, %%s, %%s, %%s, %%s, %%s, %%s, %%s); """ % (', '.join(cols))
-    # cur.executemany(query, combo)
-    cur.execute(query, vals)
-con.commit()
+    # Create a DB
+    cfg = DBInfo()
+    db_name = cfg.db_name  # "chem_exps"
+    con = psycopg.connect(dbname=db_name, autocommit=True)
+    cur = con.cursor()
+    if recreate:
+        print("(Re)creating the database.")
+        cur.execute("DROP TABLE IF EXISTS metadata")
+        cur.execute("CREATE TABLE metadata(id SERIAL PRIMARY KEY, reserved boolean, finished boolean, data_prop float, label_prop float, objective varchar, lr float, bs int, moa boolean, target boolean, layers int, width int, batch_effect_correct boolean)")
+        cur.execute("DROP TABLE IF EXISTS results")
+        cur.execute("CREATE TABLE results(id SERIAL PRIMARY KEY, meta_id int, moa_acc float, moa_loss float, moa_acc_std float, moa_loss_std float, target_acc float, target_loss float, target_acc_std float, target_loss_std float)")
 
-# res = cur.execute("SELECT * from metadata")
-# print(res.fetchall())
-con.close()
-print("Successfully created DB.")
+    # Add combos to DB.
+    for idx, combo in tqdm(enumerate(combinations), total=len(combinations), desc="Preparing inserts"):
+        cols = [x for x in combo.keys()]
+        vals = [x for x in combo.values()]
+        cols = ["reserved", "finished"] + cols
+        # vals = [idx, False, False] + vals
+        vals = [False, False] + vals
+        # cols = tuple(cols)
+        # vals = tuple(vals)
+        query = """INSERT INTO metadata(%s) VALUES(%%s, %%s, %%s, %%s, %%s, %%s, %%s, %%s, %%s, %%s, %%s, %%s); """ % (', '.join(cols))
+        # cur.executemany(query, combo)
+        cur.execute(query, vals)
+    con.commit()
 
+    # res = cur.execute("SELECT * from metadata")
+    # print(res.fetchall())
+    con.close()
+    print("Successfully populated DB.")
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description="Train and test one model.")
+    parser.add_argument('--recreate', action='store_true')
+    args = parser.parse_args()
+
+    # Define experiments to add to DB
+    exps = {
+        "data_prop": [0.5, 1.],  # [0.1, 0.2, 0.4, 0.6, 0.8, 1.],  # np.arange(0, 1.1, 0.1),
+        "label_prop": [0.5, 1.],  # [0.1, 0.2, 0.4, 0.6, 0.8, 1.],  # np.arange(0, 1.1, 0.1),  # Proportion of labels, i.e. x% of molecules for labels
+        "objective": ["mol_class", "masked_recon"],
+        "lr": [1e-3],  # , 1e-4],
+        "bs": [10000],
+        "moa": [True],
+        "target": [True],
+        "layers": [6],  # [1, 3, 6],  # [1, 3, 6, 12],
+        "width": [1024],  # [256, 512, 768],  # [256, 512, 768, 1024],
+        "batch_effect_correct": [True],  # , False],
+    }
+    main(**args, exps=exps)
