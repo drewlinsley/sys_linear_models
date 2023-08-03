@@ -48,13 +48,13 @@ exps = {
     "data_prop": [0.5, 1.],  # [0.1, 0.2, 0.4, 0.6, 0.8, 1.],  # np.arange(0, 1.1, 0.1),
     "label_prop": [0.5, 1.],  # [0.1, 0.2, 0.4, 0.6, 0.8, 1.],  # np.arange(0, 1.1, 0.1),  # Proportion of labels, i.e. x% of molecules for labels
     "objective": ["mol_class", "masked_recon"],
-    "lr": [1e-3, 1e-4],
-    "bs": [5000],
+    "lr": [1e-3],  # , 1e-4],
+    "bs": [10000],
     "moa": [True],
     "target": [True],
-    "layers": [1, 3, 6],  # [1, 3, 6, 12],
-    "width": [256, 512, 768],  # [256, 512, 768, 1024],
-    "batch_effect_correct": [True, False],
+    "layers": [6],  # [1, 3, 6],  # [1, 3, 6, 12],
+    "width": [1024],  # [256, 512, 768],  # [256, 512, 768, 1024],
+    "batch_effect_correct": [True],  # , False],
 }
 
 combinations = get_all_combinations(exps)

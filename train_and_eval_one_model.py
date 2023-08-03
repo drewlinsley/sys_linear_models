@@ -392,7 +392,7 @@ def main(
         shuffle=False)
     train_enc, train_lab = [], []
     with torch.no_grad():
-        for batch_idx, batch in enumerate(train_loader):
+        for batch_idx, batch in tqdm(enumerate(train_loader), total=len(train_loader), desc="Processing training data"):
             dv, text_embeddings, iv_s, iv_b, iv_w = batch
 
             # Preprocess data for some model approaches
@@ -419,7 +419,7 @@ def main(
         shuffle=False)
     test_enc, test_lab = [], []
     with torch.no_grad():
-        for batch_idx, batch in enumerate(test_loader):
+        for batch_idx, batch in tqdm(enumerate(test_loader), total=len(train_loader), desc="Processing training data"):
             dv, text_embeddings, iv_s, iv_b, iv_w = batch
 
             # Preprocess data for some model approaches
@@ -473,19 +473,20 @@ if __name__ == '__main__':
         # Run in debug mode
         params = {
             "id": -1,
-            "data_prop": np.arange(0, 1.1, 0.1)[-1],
-            "label_prop": [0.1, 0.25, 0.5, 1.0][0],  # Proportion of labels, i.e. x% of molecules for labels
-            "objective": ["mol_class", "masked_recon", "barlow"][0],
-            "lr": [1e-3, 1e-4][0],
+            "data_prop": .1,
+            "label_prop": .1,
+            "objective": "mol_class",
+            "lr": 1e-4,
             "bs": [10000][0],
             "moa": [True][0],
             "target": [True][0],
-            "layers": [1, 3, 6, 12, 24][0],
-            "width": [64, 128, 512, 1024, 2048][0],
+            "layers": 3,
+            "width": 1024,
             "batch_effect_correct": [True, False][0],
         }
     else:
         # Run in DB mode
         params = db_utils.get_and_reserve_params()
-    main(args.ckpt, **params)
+    print(json.dumps(params))
+    main(**params, ckpt=args.ckpt)
 

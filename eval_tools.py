@@ -17,6 +17,14 @@ from torchsampler import ImbalancedDatasetSampler
 from torcheval.metrics import MulticlassAUPRC
 
 
+def renumber_from_0(vector):
+    """Renumber a vector so that it starts from 0 and its entries are sequential."""
+    unique_values = np.unique(vector)
+    value_map = {value: idx for idx, value in enumerate(unique_values)}
+    renumbered_vector = [value_map[value] for value in vector]
+    return np.asarray(renumbered_vector)
+
+
 def bootstrap(y, yhat, its, metric):
     out = []
     for i in range(its):
@@ -64,6 +72,8 @@ def run(
         loss_type="cce",
         lr=1e-3,
         wd=1e-4,
+        rebalance=True,
+        renumber=True,
         eval_data_dir="eval_data",
         stop_criterion=15,
         warmup_steps=30,
@@ -87,12 +97,38 @@ def run(
     test_X = test_X[keep_test]
     test_y = test_y[keep_test]
 
+    # Rebalance the categories so we have the same ones in train and test
+    # One example per category
+    if rebalance:
+        all_X = np.concatenate((train_X, test_X), 0)
+        all_y = np.concatenate((train_y, test_y), 0)
+        uy = np.unique(all_y)
+        test_idx, test_h = [], {}
+        for i in range(len(all_y)):
+            if all_y[i] not in test_h:
+                test_idx.append(i)
+                test_h[all_y[i]] = True
+        test_idx = np.asarray(test_idx)
+        train_idx = np.arange(len(all_y))
+        train_idx = train_idx[~np.in1d(train_idx, test_idx)]
+        train_X = all_X[train_idx]
+        train_y = all_y[train_idx]
+        test_X = all_X[test_idx]
+        test_y = all_y[test_idx]
+
     # Remap from compounds to test labels
     train_y = np.asarray([id_remap[compound_remap[x]] for x in train_y])
     test_y = np.asarray([id_remap[compound_remap[x]] for x in test_y])
 
+    if renumber:
+        all_y = np.concatenate((train_y, test_y))
+        idx = np.concatenate((np.zeros((len(train_y))), np.ones((len(test_y)))))
+        all_y = renumber_from_0(all_y)
+        train_y = all_y[idx == 0]
+        test_y = all_y[idx == 1]
+
     # Hyperparams
-    nc = len(target_keys)  # torch.unique(train_y))
+    nc = len(np.unique(train_y))  # torch.unique(train_y))
     model = TinyModel(in_dims=width, out_dims=nc).to("cuda")
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -131,6 +167,8 @@ def run(
         pt_test_X,
         pt_test_Y)
     sampler = ImbalancedDatasetSampler(train_dataset)
+    bs = min(bs, len(train_dataset))
+    test_bs = min(test_bs, len(test_dataset))
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
         drop_last=True,
@@ -150,9 +188,12 @@ def run(
     # Run training
     n_b = len(train_dataset) // bs
     best_loss = 100
+    best_acc = 0
     for epoch in range(epochs):
         progress = tqdm(total=n_b, desc="Training")
         model.train()
+        losses = []
+        metric = MulticlassAUPRC(num_classes=nc)
         for batch in train_loader:
             it_X, it_y = batch
             it_X = it_X.to(device)
@@ -165,17 +206,19 @@ def run(
             l = loss(z, it_y)
 
             # z_q = (z > 0.5).float().cpu().numpy()
-            z_q = z.argmax(1).detach().cpu()
-            acc = bas(it_y.cpu().numpy(), z_q)
+            # z_q = z.argmax(1).detach().cpu()
+            # acc = bas(it_y.cpu().numpy(), z_q)
+            metric.update(z, it_y)
 
             l.backward()
             optimizer.step()
             scheduler.step()
-            progress.set_postfix(
-                {
-                    "train_loss": l.item(),
-                    "train_acc": acc})
-            progress.update()
+            losses.append(l.item())
+        progress.set_postfix(
+            {
+                "train_loss": np.mean(losses),
+                "train_acc": metric.compute()})
+        progress.update()
 
         model.eval()
         test_loss, preds, gts = [], [], []
@@ -190,7 +233,7 @@ def run(
                     it_y = torch.nn.functional.one_hot(it_y, nc).float()
                 l = loss(z, it_y)
                 # z_q = (z > 0.5).float().cpu().numpy()
-                z_q = z.argmax(1).detach().cpu().numpy()
+                # z_q = z.argmax(1).detach().cpu().numpy()
                 # acc = bas(it_y.cpu().numpy(), z_q)
                 # preds.append(z_q)
                 # preds.append(z)  # .detach().cpu().numpy())
@@ -200,15 +243,20 @@ def run(
                 metric.update(z, it_y)
                 # accs.append(acc)
         it_test_loss = np.mean(test_loss)
-        best_acc = metric.compute()
+        it_best_acc = metric.compute()
         progress.set_postfix(
             {
-                "test_loss": it_test_loss})
+                "test_loss": it_test_loss,
+                "test_acc": it_best_acc},
+            )
         progress.update()
         progress.close()
 
         # Save best model
-        if it_test_loss < best_loss:
+        # if it_test_loss < best_loss:
+        if it_best_acc > best_acc:
+            # best_loss = it_test_loss
+            best_acc = it_best_acc
             best_loss = it_test_loss
             epoch_counter = 0
             loss_std = np.std(test_loss) / np.sqrt(len(test_loss))
