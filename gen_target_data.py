@@ -113,8 +113,11 @@ def main():
         cont_act = control_data[idx]
         ikeys = keys[idx]
         iinchi = inchis[idx]
-        if t not in compound_target_remap:
-            compound_target_remap[comps[idx][0]] = t
+        iuc = np.unique(comps[idx])
+        checks = [x for x in iuc if x not in compound_target_remap]
+        if len(checks):
+            for cc in checks:
+                compound_target_remap[cc] = t
         ismile = smiles[idx]
         train_X.append(act[:-1])
         cont_train_X.append(cont_act[:-1])

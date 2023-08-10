@@ -28,7 +28,6 @@ def renumber_from_0(vector):
 def bootstrap(y, yhat, its, metric):
     out = []
     for i in range(its):
-        import pdb;pdb.set_trace()
         idx = np.random.randint(0, len(y), size=len(y))
         it_y = y[idx]
         it_yhat = yhat[idx]
@@ -66,14 +65,16 @@ def run(
         test_y,
         device,
         width,
-        bs=32768,
-        test_bs=1,
+        bs=160000,  # 32768,
+        test_bs=10000,
         epochs=100,
         loss_type="cce",
         lr=1e-3,
         wd=1e-4,
         rebalance=True,
         renumber=True,
+        sel_train=None,
+        sel_test=None,
         eval_data_dir="eval_data",
         stop_criterion=15,
         warmup_steps=30,
@@ -96,12 +97,17 @@ def run(
     train_y = train_y[keep_train] 
     test_X = test_X[keep_test]
     test_y = test_y[keep_test]
+    if sel_train is not None:
+        sel_train = sel_train[keep_train]
+        sel_test = sel_test[keep_test]
 
     # Rebalance the categories so we have the same ones in train and test
     # One example per category
     if rebalance:
         all_X = np.concatenate((train_X, test_X), 0)
         all_y = np.concatenate((train_y, test_y), 0)
+        if sel_train is not None:
+            sel_all = np.concatenate((sel_train, sel_test), 0)
         uy = np.unique(all_y)
         test_idx, test_h = [], {}
         for i in range(len(all_y)):
@@ -115,6 +121,9 @@ def run(
         train_y = all_y[train_idx]
         test_X = all_X[test_idx]
         test_y = all_y[test_idx]
+        if sel_train is not None:
+            sel_train = sel_all[train_idx]
+            sel_test = sel_all[test_idx]
 
     # Remap from compounds to test labels
     train_y = np.asarray([id_remap[compound_remap[x]] for x in train_y])
@@ -282,6 +291,58 @@ def run(
         "loss": best_loss,
         "loss_std": loss_std, 
     }
+    if kind == "moa":
+        # Add some rediscovery results
+        # Encode training set
+        train_loader = torch.utils.data.DataLoader(
+            train_dataset,
+            batch_size=bs,
+            drop_last=False,
+            shuffle=False)
+        train_enc, train_lab = [], []
+        with torch.no_grad():
+            for batch_idx, batch in tqdm(enumerate(train_loader), total=len(train_loader), desc="Processing training data"):
+                it_X, it_y = batch
+                it_X = it_X.to(device)
+                it_y = it_y.to(device)
+                z = model(it_X)
+                train_enc.append(z)
+                train_lab.append(it_y)
+        train_enc = torch.cat(train_enc).cpu().numpy()
+        train_lab = torch.cat(train_lab).cpu().numpy()
+
+        # Encode test set
+        test_loader = torch.utils.data.DataLoader(
+            test_dataset,
+            batch_size=bs,
+            drop_last=False,
+            shuffle=False)
+        test_enc, test_lab = [], []
+        with torch.no_grad():
+            for batch_idx, batch in tqdm(enumerate(test_loader), total=len(train_loader), desc="Processing training data"):
+                it_X, it_y = batch
+                it_X = it_X.to(device)
+                it_y = it_y.to(device)
+                z = model(it_X)
+                test_enc.append(z)
+                test_lab.append(it_y)
+        test_enc = torch.cat(test_enc).cpu().numpy()  # Slow but convenient. Consider removing.
+        test_lab = torch.cat(test_lab).cpu().numpy()
+
+        # How close is Rapamaycin to Rapalogues (other mTOR inhibitors)
+        redisc_train_X = train_enc[sel_train]
+        dists = cdist(redisc_train_X, test_enc, metric="euclidean")
+        dists = dists.mean(0)
+        ks = np.asarray([x for x in id_remap.keys()])
+        rapa_id = np.where(np.logical_or(ks == "mTOR inhibitor", ks == "mTOR inhibitor|PI3K inhibitor"))[0]
+        cont_id = np.where(ks == "contrast agent")[0][0]
+        rapa_dists = dists[np.in1d(test_y, rapa_id)]
+        cont_dists = dists[test_y == cont_id]
+        norm_d = rapa_dists.mean() / rapa_dists.std() - cont_dists.mean() / cont_dists.std()
+        results["rediscovery_acc"] = norm_d
+        results["rediscovery_z"] = 0.
+        # results["rediscovery_acc_std"] = 0
+        # results["rediscovery_loss_std"] = 0
     return results
 
 

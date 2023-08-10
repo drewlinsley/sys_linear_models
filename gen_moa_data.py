@@ -105,6 +105,7 @@ def main():
     train_key, test_key = [], []
     train_inchi, test_inchi = [], []
     train_smile, test_smile = [], []
+    train_comps, test_comps = [], []
     compound_moa_remap = {}
     for i, t in tqdm(enumerate(umoas), total=umoa_len, desc="MoAs"):
         ikeys = df_comb[moas == t].inchi_key.values
@@ -113,8 +114,11 @@ def main():
         cont_act = control_data[idx]
         ikeys = keys[idx]
         iinchi = inchis[idx]
-        if t not in compound_moa_remap:
-            compound_moa_remap[comps[idx][0]] = t
+        iuc = np.unique(comps[idx])
+        checks = [x for x in iuc if x not in compound_moa_remap]
+        if len(checks):
+            for cc in checks:
+                compound_moa_remap[cc] = t
         ismile = smiles[idx]
         train_X.append(act[:-1])
         cont_train_X.append(cont_act[:-1])
@@ -161,6 +165,8 @@ def main():
         train_y=train_y,
         test_X=test_X,
         test_y=test_y,
+        train_key=train_key,
+        test_key=test_key,
         id_remap=moa_id_remap,
         compound_remap=compound_moa_remap,
         inchi_names=np.unique(train_inchi))

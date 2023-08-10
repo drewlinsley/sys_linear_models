@@ -2,12 +2,22 @@ import db_utils
 import pandas as pd
 import seaborn as sns
 from matplotlib import pyplot as plt
+import numpy as np
 
 
 data = db_utils.get_all_results()
 import pdb;pdb.set_trace()
 df = pd.DataFrame.from_dict(data)
+comb = ((df.moa_acc + df.target_acc) / 2).values
+df["comb"] = comb
+g1 = df.groupby([x for x in df.columns[:1]]).max("comb")
+rs = [x for x in g1.columns]
+rs.pop(rs.index("lr"))
+g2 = g1.groupby(rs).max("comb").reset_index()
+palette = sns.color_palette("flare_r", len(np.unique(df.data_prop)), as_cmap=True)
 summ_df = df.groupby(['data_prop', 'label_prop', 'objective', 'layers', 'width', 'batch_effect_correct']).max().reset_index()
+# sns.relplot(data=df, x="data_prop", y="comb", size="width", hue="label_prop", col="batch_effect_correct", kind="line", palette=palette, errorbar=None);plt.show()
+sns.relplot(data=df, x="data_prop", y="comb", size="width", hue="label_prop", col="batch_effect_correct", kind="scatter", palette=palette);plt.show()
 
 # Index(['data_prop', 'label_prop', 'objective', 'layers', 'width',
 #        'batch_effect_correct', 'id', 'reserved', 'finished', 'lr', 'bs', 'moa',

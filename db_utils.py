@@ -1,5 +1,6 @@
 """Utils for database."""
 import os
+import json
 import psycopg
 from db_config import DBInfo
 
@@ -20,7 +21,7 @@ def record_performance(results):
         # First update results
         cols = [x for x in results.keys()]
         vals = [x for x in results.values()]
-        query = """INSERT INTO results(%s) VALUES (%%s, %%s, %%s, %%s, %%s, %%s, %%s, %%s, %%s); """ % (', '.join(cols))
+        query = """INSERT INTO results(%s) VALUES (%%s, %%s, %%s, %%s, %%s, %%s, %%s, %%s, %%s, %%s, %%s, %%s, %%s, %%s); """ % (', '.join(cols))
         cur.execute(query, vals)
 
         # Next update the metadata
@@ -37,4 +38,23 @@ def get_all_results():
         res = cur.execute(query)
         data = res.fetchall()
     return data
+
+
+def get_all_meta():
+    """Select results joined with their metadata."""
+    db_name = DBInfo().db_name
+    with psycopg.connect(dbname=db_name, password="postgres", autocommit=True) as con, con.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        query = """SELECT * FROM metadata ORDER BY id;"""
+        res = cur.execute(query)
+        data = res.fetchall()
+    return data
+
+
+if __name__ == '__main__':
+    meta = get_all_meta()
+    total = len(meta)
+    completed = len([k for k in meta if k["finished"]])
+    remaining = total - completed
+    print(json.dumps(get_all_meta(), indent=2))
+    print("Total: {}, Completed: {}, Remaining: {}".format(total, completed, remaining))
 

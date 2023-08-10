@@ -7,9 +7,11 @@ import numpy as np
 def get_obj_fun(objective):
     """Selector for objective functions."""
     if objective == "mol_class":
-        obj = nn.CrossEntropyLoss
+        obj = CCE  # nn.CrossEntropyLoss
     elif objective == "masked_recon":
-        obj = nn.MSELoss  # masking_loss
+        obj = MSE  # nn.MSELoss  # masking_loss
+    elif objective == "denoising":
+        obj = MSE  # nn.MSELoss  # masking_loss
     elif obj == "barlow":
         obj = barlow_loss
     else:
@@ -17,14 +19,42 @@ def get_obj_fun(objective):
     return obj
 
 
-class barlow_loss:
-    def __init__():
-        raise NotImplementedError
+class CCE:
+    def __init__(self):
         pass
+
+    def __call__(self, X, y, mask):
+        # Compare X to y with L2 loss
+        return nn.CrossEntropyLoss()(X, y)
+
+
+class MSE:
+    def __init__(self):
+        pass
+
+    def __call__(self, X, y, mask):
+        # Compare X to y with L2 loss
+        X = X[mask]
+        y = y[mask]
+        return nn.MSELoss()(X, y)
+
+
+class barlow_loss:
+    def __init__(lambd=0.0051):
+        self.lambd = lambd
 
     def __call__(X, y=None):
         # Compare X to y with L2 loss
-        return nn.MSELoss()(X, y)
+        # empirical cross-correlation matrix
+
+        # sum the cross-correlation matrix between all gpus
+        X.div_(len(X))
+        # torch.distributed.all_reduce(X)
+
+        on_diag = torch.diagonal(X).add_(-1).pow_(2).sum()
+        off_diag = off_diagonal(X).pow_(2).sum()
+        loss = on_diag + self.lambd * off_diag
+        return loss
 
 
 def preprocess(x, y, objective, label_prop):
@@ -32,10 +62,16 @@ def preprocess(x, y, objective, label_prop):
         y = x.clone()
         mask = torch.rand_like(x, requires_grad=False) < label_prop
         x[mask] = -100
-    return x, y
+    elif objective == "denoising":
+        y = x.clone()
+        x = x  #  + torch.rand_like(x) * 0.01
+        mask = 0
+    else:
+        mask = 0
+    return x, y, mask
 
 
-def prepare_labels(y, x, s, b, w, objective, label_prop, data_prop, reference=None):
+def prepare_labels(y, x, s, b, w, i, objective, label_prop, data_prop, reference=None):
     """Control how many labels vs. data you keep for training."""
     # Keep labels overlapping with reference
     assert reference is not None, "Pass test set as reference"
@@ -61,12 +97,22 @@ def prepare_labels(y, x, s, b, w, objective, label_prop, data_prop, reference=No
     keep_count = int(len(additional_mask) * data_prop)
     additional_mask = additional_mask[:keep_count]
     keep = np.concatenate((main_ids, additional_mask))
+
+    # Add on additional IDs for embedding test
+    embs = np.where(i)[0]
+    for e in embs:
+        if e not in keep:
+            keep = np.concatenate((keep, [e]))
+    # keep = np.concatenate((keep, np.where(i)[0]))
+
+    # Get appropriate indices
     y = y[keep]
     x = x[keep]
     s = s[keep]
     b = b[keep]
     w = w[keep]
-    return y, x, s, b, w
+    i = i[keep]
+    return y, x, s, b, w, i
 
 
 def prepare_data(y, x, s, b, w, data_prop):
