@@ -514,10 +514,12 @@ def main(
             _, neg_orf_emb = model(dv=neg_orf, iv_s=neg_orf_source, iv_b=neg_orf_batch, iv_w=neg_orf_well, return_p=True)
             _, pos_crispr_emb = model(dv=pos_crispr, iv_s=pos_crispr_source, iv_b=pos_crispr_batch, iv_w=pos_crispr_well, return_p=True)
             _, neg_crispr_emb = model(dv=neg_crispr, iv_s=neg_crispr_source, iv_b=neg_crispr_batch, iv_w=neg_crispr_well, return_p=True)
+            pos_orf_emb, neg_orf_emb = pos_orf_emb.cpu(), neg_orf_emb.cpu()
+            pos_crispr_emb, neg_crispr_emb = pos_crispr_emb.cpu(), neg_crispr_emb.cpu()
 
     # Compute z primes (Actually just a measure of separability...)
-    orf_ds = cdist(pos_orf_emb.cpu(), neg_orf_emb.cpu(), metric="euclidean").mean(1)
-    crispr_ds = cdist(pos_crispr_emb.cpu(), neg_crispr_emb.cpu(), metric="euclidean").mean(1)
+    orf_ds = cdist(pos_orf_emb, neg_orf_emb, metric="euclidean").mean(1)
+    crispr_ds = cdist(pos_crispr_emb, neg_crispr_emb, metric="euclidean").mean(1)
     z_prime_orf = orf_ds.mean() / orf_ds.std()
     z_prime_crispr = crispr_ds.mean() / crispr_ds.std()
 
