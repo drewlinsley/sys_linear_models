@@ -156,6 +156,9 @@ def main(
         width,
         batch_effect_correct,
 
+        # Cellprofiler is the baseline model
+        cell_profiler=False,
+
         # Choose to eval a pretrained model or not
         ckpt=None,
 
