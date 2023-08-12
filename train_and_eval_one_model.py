@@ -175,7 +175,7 @@ def main(
         test_epochs=500,
         version=24,
         inchi_key="ZWYQUVBAZLHTHP-UHFFFAOYSA-N",
-        final_data="/media/data/assay_data.npz",
+        final_data="/media/data_cifs/projects/prj_video_imagenet/sys_linear_models/assay_data.npz",
         perturb_data="/media/data/final_data.npz",
         ckpt_dir="/media/data/sys_ckpts",
     ):
@@ -301,11 +301,11 @@ def main(
         model.parameters(),
         weight_decay=1e-6,  # Default
         lr=lr)  # ,
-    # scheduler = get_cosine_schedule_with_warmup(  # get_linear_schedule_with_warmup(
-    #     optimizer,
-    #     num_warmup_steps=warmup_steps,
-    #     num_training_steps=epochs * int(len(train_loader) // bs)
-    # )
+    scheduler = get_cosine_schedule_with_warmup(  # get_linear_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps=warmup_steps,
+        num_training_steps=epochs * int(len(train_loader) // bs)
+    )
 
     # Objective function
     obj_fun = model_utils.get_obj_fun(objective)
@@ -368,7 +368,7 @@ def main(
                     # accelerator.backward(loss)
                     loss.backward()
                     optimizer.step()
-                    # scheduler.step()  # Lets go without a scheduler for now
+                    scheduler.step()  # Lets go without a scheduler for now
                     batch_losses.append(loss)
                     progress.set_postfix({"train_loss": loss})  # , "compounds": comp_loss, "phenotypes": pheno_loss})
                     progress.update()
@@ -566,15 +566,15 @@ if __name__ == '__main__':
         # Run in debug mode
         params = {
             "id": -1,
-            "data_prop": 1.,
-            "label_prop": 1.,
+            "data_prop": 0.01,
+            "label_prop": 0.01,
             "objective": "mol_class",
             "lr": 1e-3,
             "bs": [8000][0],
             "moa": [True][0],
             "target": [True][0],
-            "layers": 12,
-            "width": 1512,
+            "layers": 6,
+            "width": 512,
             "batch_effect_correct": [True, False][0],
             "cell_profiler": False
         }
