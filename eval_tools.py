@@ -188,11 +188,11 @@ def run(
         batch_size=test_bs,  # len(test_dataset),
         drop_last=False,
         shuffle=False)
-    scheduler = get_cosine_schedule_with_warmup(  # get_linear_schedule_with_warmup(
-        optimizer,
-        num_warmup_steps=warmup_steps,
-        num_training_steps=epochs * int(len(train_loader) // bs)
-    )
+    # scheduler = get_cosine_schedule_with_warmup(  # get_linear_schedule_with_warmup(
+    #     optimizer,
+    #     num_warmup_steps=warmup_steps,
+    #     num_training_steps=epochs * int(len(train_loader) // bs)
+    # )
 
     # Run training
     n_b = len(train_dataset) // bs
@@ -221,7 +221,7 @@ def run(
 
             l.backward()
             optimizer.step()
-            scheduler.step()
+            # scheduler.step()  # Let's go without the scheduler for now
             losses.append(l.item())
         progress.set_postfix(
             {

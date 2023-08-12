@@ -180,9 +180,9 @@ def main(
         ckpt_dir="/media/data/sys_ckpts",
     ):
     """Run one iteration of training and evaluation."""
-    accelerator = Accelerator()
-    device = accelerator.device
-    # device = "cuda"
+    # accelerator = Accelerator()
+    # device = accelerator.device
+    device = "cuda"
 
     if not os.path.exists(ckpt_dir):
         os.makedirs(ckpt_dir, exist_ok=True)
@@ -301,20 +301,20 @@ def main(
         model.parameters(),
         weight_decay=1e-6,  # Default
         lr=lr)  # ,
-    scheduler = get_cosine_schedule_with_warmup(  # get_linear_schedule_with_warmup(
-        optimizer,
-        num_warmup_steps=warmup_steps,
-        num_training_steps=epochs * int(len(train_loader) // bs)
-    )
+    # scheduler = get_cosine_schedule_with_warmup(  # get_linear_schedule_with_warmup(
+    #     optimizer,
+    #     num_warmup_steps=warmup_steps,
+    #     num_training_steps=epochs * int(len(train_loader) // bs)
+    # )
 
     # Objective function
     obj_fun = model_utils.get_obj_fun(objective)
-    model, optimizer, train_loader, test_loader, scheduler = accelerator.prepare(
-        model,
-        optimizer,
-        train_loader,
-        test_loader,
-        scheduler)
+    # model, optimizer, train_loader, test_loader, scheduler = accelerator.prepare(
+    #     model,
+    #     optimizer,
+    #     train_loader,
+    #     test_loader,
+    #     scheduler)
     model.to(device)
     avg_loss = torch.tensor(0).float().to(device)
 
@@ -334,8 +334,8 @@ def main(
             # accelerator.wait_for_everyone()
             for epoch in range(epochs):
                 batch_losses = []
-                progress = tqdm(total=len(train_loader), desc="Training", disable=not accelerator.is_local_main_process)
-                # progress = tqdm(total=len(train_loader), desc="Training")
+                # progress = tqdm(total=len(train_loader), desc="Training", disable=not accelerator.is_local_main_process)
+                progress = tqdm(total=len(train_loader), desc="Training")
                 model.train()
                 for batch_idx, batch in enumerate(train_loader):  # tqdm(enumerate(sample1_loader), total=len(sample1_loader), desc="Epoch"):            
                     optimizer.zero_grad(set_to_none=True)
@@ -345,11 +345,11 @@ def main(
                     dv, text_embeddings, mask = model_utils.preprocess(dv, text_embeddings, objective, label_prop)
 
                     # Move data to GPU. Only needed when we dont use accelerate
-                    # dv = dv.to(device)
-                    # text_embeddings = text_embeddings.to(device)
-                    # iv_s = iv_s.to(device)
-                    # iv_b = iv_b.to(device)
-                    # iv_w = iv_w.to(device)
+                    dv = dv.to(device)
+                    text_embeddings = text_embeddings.to(device)
+                    iv_s = iv_s.to(device)
+                    iv_b = iv_b.to(device)
+                    iv_w = iv_w.to(device)
                     #
                     image_embeddings, b, s, w = model(dv=dv, iv_s=iv_s, iv_b=iv_b, iv_w=iv_w)
 
@@ -365,10 +365,10 @@ def main(
                         loss = loss + bl + sl + wl
 
                     # Optimize
-                    accelerator.backward(loss)
-                    # loss.backward()
+                    # accelerator.backward(loss)
+                    loss.backward()
                     optimizer.step()
-                    scheduler.step()
+                    # scheduler.step()  # Lets go without a scheduler for now
                     batch_losses.append(loss)
                     progress.set_postfix({"train_loss": loss})  # , "compounds": comp_loss, "phenotypes": pheno_loss})
                     progress.update()
