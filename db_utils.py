@@ -9,7 +9,7 @@ def get_and_reserve_params():
     # Create a DB
     db_name = DBInfo().db_name
     with psycopg.connect(dbname=db_name, password="postgres", autocommit=True) as con, con.cursor(row_factory=psycopg.rows.dict_row) as cur:
-        res = cur.execute("UPDATE metadata SET reserved=True WHERE id in (SELECT id from metadata WHERE reserved=False LIMIT 1) RETURNING *")
+        res = cur.execute("UPDATE metadata SET reserved=True WHERE id in (SELECT id from metadata WHERE reserved=False ORDER BY random() LIMIT 1) RETURNING *")
         data = res.fetchone()
     return data
 

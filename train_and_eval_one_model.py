@@ -326,6 +326,7 @@ def main(
         test_lab = test_compounds
         best_loss = -1  # Dummy
         width = train_res.shape[1]
+        print("Skipping training — using cell profiler instead.")
     else:
         if ckpt is not None:
             path = ckpt
@@ -549,7 +550,8 @@ def main(
     db_utils.record_performance(results)
 
     # Clean up weights
-    os.remove(path)
+    if not cell_profiler:
+        os.remove(path)
     print(json.dumps(results, indent=2))
     print("Finished")
     
@@ -564,17 +566,17 @@ if __name__ == '__main__':
         # Run in debug mode
         params = {
             "id": -1,
-            "data_prop": 0.01,
-            "label_prop": 0.01,
+            "data_prop": 1.,
+            "label_prop": 1.,
             "objective": "mol_class",
             "lr": 1e-3,
             "bs": [8000][0],
             "moa": [True][0],
             "target": [True][0],
-            "layers": 3,
-            "width": 128,
+            "layers": 12,
+            "width": 1512,
             "batch_effect_correct": [True, False][0],
-            "cell_profiler": True
+            "cell_profiler": False
         }
     else:
         # Run in DB mode

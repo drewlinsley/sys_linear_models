@@ -100,7 +100,7 @@ if __name__ == '__main__':
         "label_prop": [0.01, .25, 0.5, .75, 1.],  # [0.1, 0.2, 0.4, 0.6, 0.8, 1.],  # np.arange(0, 1.1, 0.1),  # Proportion of labels, i.e. x% of molecules for labels
         "objective": ["mol_class"],  # "masked_recon"],
         "lr": [1e-3],
-        "bs": [10000],
+        "bs": [8000],
         "moa": [True],
         "target": [True],
         "layers": [1, 3, 6, 9, 12],  # [1, 3, 6, 12],
