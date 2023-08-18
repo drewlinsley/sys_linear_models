@@ -66,6 +66,7 @@ def main(exps, recreate, repeats=1):
         cur.execute("CREATE TABLE results(id SERIAL PRIMARY KEY, meta_id int, task_loss float, moa_acc float, moa_loss float, moa_acc_std float, moa_loss_std float, target_acc float, target_loss float, target_acc_std float, target_loss_std float, rediscovery_acc float, rediscovery_z float, z_prime_orf float, z_prime_crispr float)")
 
     # Add combos to DB.
+    combinations = combinations[::-1]  # Reverse so we get best first
     for idx, combo in tqdm(enumerate(combinations), total=len(combinations), desc="Preparing inserts"):
         cols = [x for x in combo.keys()]
         vals = [x for x in combo.values()]
@@ -99,8 +100,8 @@ if __name__ == '__main__':
         "data_prop": [0.01, .25, 0.5, .75, 1.],  # [0.1, 0.2, 0.4, 0.6, 0.8, 1.],  # np.arange(0, 1.1, 0.1),
         "label_prop": [0.01, .25, 0.5, .75, 1.],  # [0.1, 0.2, 0.4, 0.6, 0.8, 1.],  # np.arange(0, 1.1, 0.1),  # Proportion of labels, i.e. x% of molecules for labels
         "objective": ["mol_class"],  # "masked_recon"],
-        "lr": [1e-3],
-        "bs": [8000],
+        "lr": [1e-4],
+        "bs": [6000],
         "moa": [True],
         "target": [True],
         "layers": [1, 3, 6, 9, 12],  # [1, 3, 6, 12],

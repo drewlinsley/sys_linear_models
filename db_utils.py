@@ -1,5 +1,6 @@
 """Utils for database."""
 import os
+import sys
 import json
 import psycopg
 from db_config import DBInfo
@@ -9,7 +10,8 @@ def get_and_reserve_params():
     # Create a DB
     db_name = DBInfo().db_name
     with psycopg.connect(dbname=db_name, password="postgres", autocommit=True) as con, con.cursor(row_factory=psycopg.rows.dict_row) as cur:
-        res = cur.execute("UPDATE metadata SET reserved=True WHERE id in (SELECT id from metadata WHERE reserved=False ORDER BY random() LIMIT 1) RETURNING *")
+        # res = cur.execute("UPDATE metadata SET reserved=True WHERE id in (SELECT id from metadata WHERE reserved=False ORDER BY random() LIMIT 1) RETURNING *")
+        res = cur.execute("UPDATE metadata SET reserved=True WHERE id in (SELECT id from metadata WHERE reserved=False LIMIT 1) RETURNING *")
         data = res.fetchone()
     return data
 
@@ -45,16 +47,39 @@ def get_all_meta():
     db_name = DBInfo().db_name
     with psycopg.connect(dbname=db_name, password="postgres", autocommit=True) as con, con.cursor(row_factory=psycopg.rows.dict_row) as cur:
         query = """SELECT * FROM metadata ORDER BY id;"""
+        # query = """SELECT * FROM metadata WHERE reserved=True and finished=False ORDER BY id ;"""
         res = cur.execute(query)
         data = res.fetchall()
     return data
 
 
+def find_unfinished():
+    """Select results joined with their metadata."""
+    db_name = DBInfo().db_name
+    with psycopg.connect(dbname=db_name, password="postgres", autocommit=True) as con, con.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        query = """SELECT * FROM metadata WHERE reserved=True and finished=False ORDER BY id ;"""
+        res = cur.execute(query)
+        data = res.fetchall()
+    return data
+
+
+def reset_unfinished():
+    """Set the reserved flag=False for entries in metadata where reserved=True and finished=False."""
+    db_name = DBInfo().db_name
+    with psycopg.connect(dbname=db_name, password="postgres", autocommit=True) as con, con.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        query = """UPDATE metadata SET reserved=False where reserved=True and finished=False;"""
+        res = cur.execute(query)
+
+
 if __name__ == '__main__':
-    meta = get_all_meta()
-    total = len(meta)
-    completed = len([k for k in meta if k["finished"]])
-    remaining = total - completed
-    print(json.dumps(get_all_meta(), indent=2))
-    print("Total: {}, Completed: {}, Remaining: {}".format(total, completed, remaining))
+    if len(sys.argv) > 1 and sys.argv[1] == "reset_unfinished":
+        reset_unfinished()
+        meta = find_unfinished()
+    else:
+        meta = get_all_meta()
+        total = len(meta)
+        completed = len([k for k in meta if k["finished"]])
+        remaining = total - completed
+        print(json.dumps(get_all_meta(), indent=2))
+        print("Total: {}, Completed: {}, Remaining: {}".format(total, completed, remaining))
 

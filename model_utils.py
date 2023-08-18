@@ -75,43 +75,78 @@ def prepare_labels(y, x, s, b, w, i, objective, label_prop, data_prop, reference
     """Control how many labels vs. data you keep for training."""
     # Keep labels overlapping with reference
     assert reference is not None, "Pass test set as reference"
-    h = {k: False for k in np.unique(reference)}
-    main_ids = []
-    for idx, e in enumerate(y):
-        if e in h and not h[e]:
-            main_ids.append(idx)
-            h[e] = True
-    main_ids = np.asarray(main_ids)  # 1 exemplar per test category. Minimal set
-    # main_mask = np.in1d(y, np.unique(reference))
-    # main_ids = np.where(main_mask)[0]
+    # h = {k: False for k in np.unique(reference)}
+    # main_ids = []
+    # for idx, e in enumerate(y):
+    #     if e in h:  #  and not h[e]:
+    #         main_ids.append(idx)
+    #         h[e] = True
+    # main_ids = np.asarray(main_ids)  # 1 exemplar per test category. Minimal set
     # additional_mask = np.where(~main_mask)[0]
-    additional_mask = np.arange(len(y))[~np.in1d(np.arange(len(y)), main_ids)]
     if objective == "mol_class" and label_prop < 1:
+        main_mask = np.in1d(y, np.unique(reference))
+        main_ids = np.where(main_mask)[0]
+        additional_mask = np.arange(len(y))[~np.in1d(np.arange(len(y)), main_ids)]
         # First figure out how many additional compounds/labels to keep
         ul = np.unique(y[additional_mask])
         keep_labels = int(len(ul) * label_prop)
         ul = ul[:keep_labels]
         additional_mask = additional_mask[np.in1d(y[additional_mask], ul)]
 
-    # Next figure out what proportion of data to keep
-    keep_count = int(len(additional_mask) * data_prop)
-    additional_mask = additional_mask[:keep_count]
-    keep = np.concatenate((main_ids, additional_mask))
+        # Update after label control
+        keep = np.concatenate((main_ids, additional_mask))
+        y = y[keep]
+        x = x[keep]
+        s = s[keep]
+        b = b[keep]
+        w = w[keep]
+        i = i[keep]
 
-    # Add on additional IDs for embedding test
-    embs = np.where(i)[0]
-    for e in embs:
-        if e not in keep:
-            keep = np.concatenate((keep, [e]))
-    # keep = np.concatenate((keep, np.where(i)[0]))
+    if data_prop < 1:
+        uc = np.unique(y)
+        keep_counts = {}
+        for c in uc:
+            thresh = np.ceil((y == c).sum() * data_prop)
+            keep_counts[c] = thresh
 
-    # Get appropriate indices
-    y = y[keep]
-    x = x[keep]
-    s = s[keep]
-    b = b[keep]
-    w = w[keep]
-    i = i[keep]
+        keep_h = {k: 0 for k in uc}
+        keep = []
+        for idx, c in enumerate(y):
+            if keep_h[c] <= keep_counts[c]:
+                keep.append(idx)
+                keep_h[c] += 1
+        keep = np.asarray(keep)
+
+        # Get appropriate indices
+        y = y[keep]
+        x = x[keep]
+        s = s[keep]
+        b = b[keep]
+        w = w[keep]
+        i = i[keep]
+
+    # # Next figure out what proportion of data to keep
+    # uc = y[keep]
+    # keep_counts = {}
+
+    # keep_count = int(len(additional_mask) * data_prop)
+    # additional_mask = additional_mask[:keep_count]
+    # keep = np.concatenate((main_ids, additional_mask))
+
+    # # Add on additional IDs for embedding test
+    # embs = np.where(i)[0]
+    # for e in embs:
+    #     if e not in keep:
+    #         keep = np.concatenate((keep, [e]))
+    # # keep = np.concatenate((keep, np.where(i)[0]))
+
+    # # Get appropriate indices
+    # y = y[keep]
+    # x = x[keep]
+    # s = s[keep]
+    # b = b[keep]
+    # w = w[keep]
+    # i = i[keep]
     return y, x, s, b, w, i
 
 

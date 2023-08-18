@@ -42,7 +42,7 @@ class Mmd_resnet(nn.Module):
                  embedding_dim_b,
                  embedding_dim_s,
                  # embedding_dim_p,
-                 embedding_dim_w,
+                 # embedding_dim_w,
                  batch_effect_correct,
                  objective,
                  norm_type=nn.BatchNorm1d,  # nn.LayerNorm,  # torch.nn.Identity,  # torch.nn.BatchNorm1d,
@@ -59,8 +59,30 @@ class Mmd_resnet(nn.Module):
                     num_embeddings=num_embeddings_s,
                     embedding_dim=embedding_dim_s),
                 torch.nn.Linear(embedding_dim_s, embedding_dim_s),
-                norm_type(embedding_dim_s)
+                norm_type(embedding_dim_s),
+                torch.nn.GELU(),
+                # norm_type(embedding_dim_s)
             ])
+            self.embedding_b = nn.Sequential(*[
+                torch.nn.Embedding(
+                    num_embeddings=num_embeddings_b,
+                    embedding_dim=embedding_dim_b),
+                torch.nn.Linear(embedding_dim_b, embedding_dim_b),
+                norm_type(embedding_dim_b),
+                torch.nn.GELU(),
+                # norm_type(embedding_dim_s)
+            ])
+            self.s_layers = []
+            for l in range(self.n_blocks):
+                self.s_layers.append(nn.Sequential(*[
+                    torch.nn.Linear(embedding_dim_s + embedding_dim_b, embedding_dim_s + embedding_dim_b),
+                    # torch.nn.Dropout(use_dropout),
+                    # torch.nn.GELU(),
+                    norm_type(embedding_dim_s + embedding_dim_b),
+                    torch.nn.GELU(),
+                ]))
+            self.s_layers = nn.ModuleList(self.s_layers)
+
         self.proj = nn.Sequential(*[
             nn.Linear(input_dim, int_dim),
             norm_type(int_dim)
@@ -70,19 +92,19 @@ class Mmd_resnet(nn.Module):
         for l in range(self.n_blocks):
             if self.batch_effect_correct:
                 self.dv_layers.append(nn.Sequential(*[
-                    torch.nn.Linear(int_dim + embedding_dim_s, int_dim),
-                    torch.nn.Dropout(use_dropout),
+                    torch.nn.Linear(int_dim + embedding_dim_s + embedding_dim_b, int_dim),
                     norm_type(int_dim),  # BatchNorm1d(dim),
+                    torch.nn.Dropout(use_dropout),
                     torch.nn.GELU(),
                     # norm_type(int_dim),  # BatchNorm1d(dim),
                 ]))
             else:
                 self.dv_layers.append(nn.Sequential(*[
                     torch.nn.Linear(int_dim, int_dim),
-                    torch.nn.Dropout(use_dropout),
                     norm_type(int_dim),  # BatchNorm1d(dim),
+                    torch.nn.Dropout(use_dropout),
                     torch.nn.GELU(),
-                    #  norm_type(int_dim),  # BatchNorm1d(dim),
+                    # norm_type(int_dim),  # BatchNorm1d(dim),
                 ]))
         self.dv_layers = nn.ModuleList(self.dv_layers)
         if objective == "barlow":
@@ -119,11 +141,16 @@ class Mmd_resnet(nn.Module):
         """Forward function (with skip connections)"""
         y = self.proj(dv)
         if self.batch_effect_correct:
-            x_s = self.embedding_s(iv_s).squeeze(1)
+            it_s = self.embedding_s(iv_s).squeeze(1)
+            it_b = self.embedding_b(iv_b).squeeze(1)
+            it_s = torch.cat((it_s, it_b), 1)
         for l in range(self.n_blocks):
             dv_layer = self.dv_layers[l]
             if self.batch_effect_correct:
-                cat_y = torch.concat((y, x_s), 1)
+                it_s = self.s_layers[l](it_s)
+                # x_s = self.s_layers[l](x_s)
+                # cat_y = torch.concat((y, x_s), 1)
+                cat_y = torch.concat((y, it_s), 1)
             else:
                 cat_y = y
             if l % 2:  # Skip
@@ -168,10 +195,10 @@ def main(
 
         # Defaults below are fixed
         epochs=2000,  # 500,
-        warmup_steps=50,
-        warmup_epochs=50,
+        warmup_steps=100,  # 50,
+        warmup_epochs=5,
         early_stopping=True,
-        stop_criterion=20,  # 16,
+        stop_criterion=10,  # 16,
         test_epochs=500,
         version=24,
         inchi_key="ZWYQUVBAZLHTHP-UHFFFAOYSA-N",
@@ -180,9 +207,9 @@ def main(
         ckpt_dir="/media/data/sys_ckpts",
     ):
     """Run one iteration of training and evaluation."""
-    # accelerator = Accelerator()
-    # device = accelerator.device
-    device = "cuda"
+    accelerator = Accelerator()
+    device = accelerator.device
+    # device = "cuda"
 
     if not os.path.exists(ckpt_dir):
         os.makedirs(ckpt_dir, exist_ok=True)
@@ -213,10 +240,10 @@ def main(
     bs = min(len(train_compounds), bs)  # Adjust so we dont overestimate batch
 
     # Default params
-    emb_dim_b = 64
+    emb_dim_b = 16  # 64
     emb_dim_s = 16  # 4
-    emb_dim_p = 16
-    emb_dim_w = 16
+    # emb_dim_p = 16  # 64  # 16
+    # emb_dim_w = 16  # 128  # 16
     num_embeddings_b = train_batch.max() + 1  # train_batch.shape[-1]
     num_embeddings_s = train_source.max() + 1  # train_source.shape[-1]
     num_embeddings_w = train_well.max() + 1  # train_well.shape[-1]
@@ -238,13 +265,13 @@ def main(
     tops = 10  # top-K classification accuracy
     nc = len(np.unique(train_compounds))
 
-    # # Inverse weighting for sampling
-    # uni_c, class_sample_count = np.unique(train_compounds, return_counts=True)
-    # weight = 1. / class_sample_count
-    # weight_dict = {k: v for k, v in zip(uni_c, weight)}
-    # samples_weight = np.array([weight_dict[t] for t in train_compounds])
-    # samples_weight = torch.from_numpy(samples_weight)
-    # sampler = WeightedRandomSampler(samples_weight, len(samples_weight))
+    # Inverse weighting for sampling
+    uni_c, class_sample_count = np.unique(train_compounds, return_counts=True)
+    weight = 1. / class_sample_count
+    weight_dict = {k: v for k, v in zip(uni_c, weight)}
+    samples_weight = np.array([weight_dict[t] for t in train_compounds])
+    samples_weight = torch.from_numpy(samples_weight)
+    sampler = WeightedRandomSampler(samples_weight, len(samples_weight))
 
     # Build data
     train_res = torch.Tensor(train_res).float()
@@ -269,12 +296,13 @@ def main(
         test_source,
         test_batch,
         test_well)
-    sampler = ImbalancedDatasetSampler(train_dataset)
+    # sampler = ImbalancedDatasetSampler(train_dataset)
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
         drop_last=True,
         batch_size=bs,
-        sampler=sampler,
+        shuffle=True,
+        # sampler=sampler,
         pin_memory=True)  # Remove pin memory if using accelerate
     test_loader = torch.utils.data.DataLoader(
         test_dataset,
@@ -295,17 +323,17 @@ def main(
         num_embeddings_s=num_embeddings_s,
         num_embeddings_w=num_embeddings_w,
         embedding_dim_b=emb_dim_b,
-        embedding_dim_s=emb_dim_s,
-        embedding_dim_w=emb_dim_w)
+        embedding_dim_s=emb_dim_s)
+        # embedding_dim_w=emb_dim_w)
     optimizer = torch.optim.AdamW(
         model.parameters(),
         weight_decay=1e-6,  # Default
         lr=lr)  # ,
-    scheduler = get_cosine_schedule_with_warmup(  # get_linear_schedule_with_warmup(
-        optimizer,
-        num_warmup_steps=warmup_steps,
-        num_training_steps=epochs * int(len(train_loader) // bs)
-    )
+    # scheduler = get_cosine_schedule_with_warmup(  # get_linear_schedule_with_warmup(
+    #     optimizer,
+    #     num_warmup_steps=warmup_steps,
+    #     num_training_steps=epochs * int(len(train_loader) // bs)
+    # )
 
     # Objective function
     obj_fun = model_utils.get_obj_fun(objective)
@@ -315,7 +343,12 @@ def main(
     #     train_loader,
     #     test_loader,
     #     scheduler)
-    model.to(device)
+    model, optimizer, train_loader, test_loader = accelerator.prepare(
+        model,
+        optimizer,
+        train_loader,
+        test_loader)
+    # model.to(device)
     avg_loss = torch.tensor(0).float().to(device)
 
     if cell_profiler:
@@ -329,6 +362,7 @@ def main(
         print("Skipping training — using cell profiler instead.")
     else:
         if ckpt is not None:
+            print("Using existing path {}".format(ckpt))
             path = ckpt
         else:
             # accelerator.wait_for_everyone()
@@ -345,11 +379,11 @@ def main(
                     dv, text_embeddings, mask = model_utils.preprocess(dv, text_embeddings, objective, label_prop)
 
                     # Move data to GPU. Only needed when we dont use accelerate
-                    dv = dv.to(device)
-                    text_embeddings = text_embeddings.to(device)
-                    iv_s = iv_s.to(device)
-                    iv_b = iv_b.to(device)
-                    iv_w = iv_w.to(device)
+                    # dv = dv.to(device)
+                    # text_embeddings = text_embeddings.to(device)
+                    # iv_s = iv_s.to(device)
+                    # iv_b = iv_b.to(device)
+                    # iv_w = iv_w.to(device)
                     #
                     image_embeddings, b, s, w = model(dv=dv, iv_s=iv_s, iv_b=iv_b, iv_w=iv_w)
 
@@ -365,10 +399,10 @@ def main(
                         loss = loss + bl + sl + wl
 
                     # Optimize
-                    # accelerator.backward(loss)
-                    loss.backward()
+                    accelerator.backward(loss)
+                    # loss.backward()
                     optimizer.step()
-                    scheduler.step()  # Lets go without a scheduler for now
+                    # scheduler.step()  # Lets go without a scheduler for now
                     batch_losses.append(loss)
                     progress.set_postfix({"train_loss": loss})  # , "compounds": comp_loss, "phenotypes": pheno_loss})
                     progress.update()
@@ -384,11 +418,11 @@ def main(
                         dv, text_embeddings, mask = model_utils.preprocess(dv, text_embeddings, objective, label_prop)
 
                         # Move data to GPU. Only needed when we dont use accelerate
-                        dv = dv.to(device)
-                        text_embeddings = text_embeddings.to(device)
-                        iv_b = iv_b.to(device)
-                        iv_s = iv_s.to(device)
-                        iv_w = iv_w.to(device)
+                        # dv = dv.to(device)
+                        # text_embeddings = text_embeddings.to(device)
+                        # iv_b = iv_b.to(device)
+                        # iv_s = iv_s.to(device)
+                        # iv_w = iv_w.to(device)
                         #
 
                         image_embeddings, b, s, w = model(dv=dv, iv_s=iv_s, iv_b=iv_b, iv_w=iv_w)
@@ -434,7 +468,7 @@ def main(
         print('Begin evaluation')
         train_loader = torch.utils.data.DataLoader(
             train_dataset,
-            batch_size=bs * 2,
+            batch_size=bs,
             drop_last=False,
             shuffle=False)
         # train_loader = accelerator.prepare(train_loader)
@@ -462,7 +496,7 @@ def main(
         # Encode test set
         test_loader = torch.utils.data.DataLoader(
             test_dataset,
-            batch_size=bs * 2,
+            batch_size=bs,
             drop_last=False,
             shuffle=False)
         # test_loader = accelerator.prepare(test_loader)
@@ -524,6 +558,10 @@ def main(
     z_prime_orf = orf_ds.mean() / orf_ds.std()
     z_prime_crispr = crispr_ds.mean() / crispr_ds.std()
 
+    # Free up memory
+    del model
+    torch.cuda.empty_cache()
+
     # Run MoA test
     moa_perf = eval_tools.run(kind="moa", train_X=train_enc, train_y=train_lab, test_X=test_enc, test_y=test_lab, device=device, epochs=test_epochs, width=width, sel_train=sel_train, sel_test=sel_test)
 
@@ -566,15 +604,15 @@ if __name__ == '__main__':
         # Run in debug mode
         params = {
             "id": -1,
-            "data_prop": 0.01,
-            "label_prop": 0.01,
+            "data_prop": 1.,
+            "label_prop": 1.,
             "objective": "mol_class",
-            "lr": 1e-3,
-            "bs": [8000][0],
+            "lr": 1e-4,
+            "bs": [6000][0],
             "moa": [True][0],
             "target": [True][0],
-            "layers": 6,
-            "width": 512,
+            "layers": 12,
+            "width": 1512,
             "batch_effect_correct": [True, False][0],
             "cell_profiler": False
         }

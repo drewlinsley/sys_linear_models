@@ -10,11 +10,14 @@ import seaborn as sns
 from matplotlib import patches
 from glob import glob
 import torch
+
 from sklearn.metrics import balanced_accuracy_score as bas
 from sklearn.metrics import average_precision_score, precision_recall_curve, f1_score
 from transformers import GPT2Tokenizer, GPT2LMHeadModel, AdamW, get_linear_schedule_with_warmup, get_cosine_schedule_with_warmup
+from timm.scheduler import CosineLRScheduler
 from torchsampler import ImbalancedDatasetSampler
 from torcheval.metrics import MulticlassAUPRC
+from torchmetrics import Accuracy
 
 
 def renumber_from_0(vector):
@@ -37,23 +40,40 @@ def bootstrap(y, yhat, its, metric):
 
 class TinyModel(torch.nn.Module):
 
-    def __init__(self, in_dims, out_dims=730, hidden=2048):
+    def __init__(self, in_dims, out_dims=730, hidden=2048, linear=False):
         super(TinyModel, self).__init__()
-        self.linear1 = torch.nn.Linear(in_dims, hidden)
+        if linear:
+            self.linear1 = torch.nn.Linear(in_dims, out_dims)  # hidden
+        else:
+            self.linear1 = torch.nn.Linear(in_dims, hidden)
+        self.linear = linear
+        self.norm1 = torch.nn.BatchNorm1d(hidden)
         self.linear2 = torch.nn.Linear(hidden, hidden)
+        self.norm2 = torch.nn.BatchNorm1d(hidden)
         self.linear3 = torch.nn.Linear(hidden, out_dims)
+        # self.norm3 = torch.nn.BatchNorm1d(hidden)
+        # self.linear4 = torch.nn.Linear(hidden, out_dims)
         self.dropout1 = torch.nn.Dropout(0.1)
         self.dropout2 = torch.nn.Dropout(0.1)
+        # self.dropout3 = torch.nn.Dropout(0.5)
         self.activation = torch.nn.GELU()
 
     def forward(self, x):
         x = self.linear1(x)
+        if self.linear:
+            return x
+        # x = self.norm1(x)
         x = self.dropout1(x)
         x = self.activation(x)
         x = self.linear2(x)
+        # x = self.norm2(x)
         x = self.dropout2(x)
         x = self.activation(x)
+        # x = self.norm2(x)
         x = self.linear3(x)
+        # x = self.dropout3(x)
+        # x = self.activation(x)
+        # x = self.linear4(x)
         return x
 
 
@@ -65,20 +85,21 @@ def run(
         test_y,
         device,
         width,
-        bs=160000,  # 32768,
-        test_bs=10000,
+        bs=6000,  # 32768,
+        test_bs=6000,
         epochs=100,
         loss_type="cce",
-        lr=1e-3,
+        lr=1e-4,
         wd=1e-6,
         rebalance=False,
         renumber=True,
         sel_train=None,
         sel_test=None,
         eval_data_dir="eval_data",
-        stop_criterion=15,
-        warmup_steps=30,
-        warmup_epochs=30):
+        stop_criterion=15,  # 15
+        top_k=10,
+        warmup_steps=200,  # 100
+        warmup_epochs=40):
 
     """Train a readout for evaluating your model."""
     data = np.load(os.path.join(eval_data_dir, "{}_data.npz".format(kind)), allow_pickle=True)
@@ -136,8 +157,8 @@ def run(
         train_y = all_y[idx == 0]
         test_y = all_y[idx == 1]
 
-    # Hyperparams
-    nc = len(np.unique(train_y))  # torch.unique(train_y))
+    # Hyperparam s
+    nc = int(train_y.max() + 1)  # len(np.unique(train_y))  # torch.unique(train_y))
     model = TinyModel(in_dims=width, out_dims=nc).to("cuda")
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -158,15 +179,15 @@ def run(
     pt_test_X = torch.from_numpy(test_X).float()
     pt_test_Y = torch.from_numpy(test_y).long()
 
-    # # Make sampler with inverse weighting
-    # print("Building sampler")
-    # uni_c, class_sample_count = np.unique(train_y, return_counts=True)
-    # weight = 1. / class_sample_count
-    # weight_dict = {k: v for k, v in zip(uni_c, weight)}
-    # samples_weight = np.array([weight_dict[t] for t in train_y])
-    # samples_weight = torch.from_numpy(samples_weight)
-    # sampler = torch.utils.data.WeightedRandomSampler(samples_weight, len(samples_weight))
-    # print("Sampler built")
+    # Make sampler with inverse weighting
+    print("Building sampler")
+    uni_c, class_sample_count = np.unique(train_y, return_counts=True)
+    weight = 1. / class_sample_count
+    weight_dict = {k: v for k, v in zip(uni_c, weight)}
+    samples_weight = np.array([weight_dict[t] for t in train_y])
+    samples_weight = torch.from_numpy(samples_weight)
+    sampler = torch.utils.data.WeightedRandomSampler(samples_weight, len(samples_weight))
+    print("Sampler built")
 
     # Make data loaders
     train_dataset = torch.utils.data.TensorDataset(
@@ -175,34 +196,43 @@ def run(
     test_dataset = torch.utils.data.TensorDataset(
         pt_test_X,
         pt_test_Y)
-    sampler = ImbalancedDatasetSampler(train_dataset)
+    # sampler = ImbalancedDatasetSampler(train_dataset)
     bs = min(bs, len(train_dataset))
     test_bs = min(test_bs, len(test_dataset))
+    print("For task: {} train samples: {} test samples: {}".format(kind, len(train_dataset), len(test_dataset)))
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
         drop_last=True,
         batch_size=bs,
-        sampler=sampler)
+        shuffle=True)
+        # sampler=sampler)
     test_loader = torch.utils.data.DataLoader(
         test_dataset,
         batch_size=test_bs,  # len(test_dataset),
         drop_last=False,
         shuffle=False)
-    # scheduler = get_cosine_schedule_with_warmup(  # get_linear_schedule_with_warmup(
+    # scheduler = get_linear_schedule_with_warmup(  # get_cosine_schedule_with_warmup(  # get_linear_schedule_with_warmup(
     #     optimizer,
     #     num_warmup_steps=warmup_steps,
     #     num_training_steps=epochs * int(len(train_loader) // bs)
     # )
+    # scheduler = CosineLRScheduler(
+    #     optimizer,
+    #     t_initial=epochs,
+    #     warmup_t=10,
+    #     warmup_lr_init=1e-6)
 
     # Run training
     n_b = len(train_dataset) // bs
     best_loss = 100
     best_acc = 0
     for epoch in range(epochs):
-        progress = tqdm(total=n_b, desc="Training")
+        progress = tqdm(total=1, desc="Training")
         model.train()
         losses = []
-        metric = MulticlassAUPRC(num_classes=nc)
+        accs = []
+        # metric = MulticlassAUPRC(num_classes=nc)
+        metric = Accuracy(task="multiclass", num_classes=nc, top_k=top_k)
         for batch in train_loader:
             it_X, it_y = batch
             it_X = it_X.to(device)
@@ -217,21 +247,26 @@ def run(
             # z_q = (z > 0.5).float().cpu().numpy()
             # z_q = z.argmax(1).detach().cpu()
             # acc = bas(it_y.cpu().numpy(), z_q)
-            metric.update(z, it_y)
+            # metric.update(z, it_y)
+            accs.append(metric(z.cpu(), it_y.cpu()))
 
             l.backward()
             optimizer.step()
             # scheduler.step()  # Let's go without the scheduler for now
             losses.append(l.item())
+        # acc = metric.compute()
+        acc = np.mean(accs)
         progress.set_postfix(
             {
                 "train_loss": np.mean(losses),
-                "train_acc": metric.compute()})
+                "train_acc": acc})
         progress.update()
 
         model.eval()
         test_loss, preds, gts = [], [], []
-        metric = MulticlassAUPRC(num_classes=nc)
+        # metric = MulticlassAUPRC(num_classes=nc)
+        metric = Accuracy(task="multiclass", num_classes=nc, top_k=top_k)
+        accs = []
         for batch in test_loader:
             with torch.no_grad():
                 it_X, it_y = batch
@@ -249,12 +284,14 @@ def run(
                 # gts.append(it_y)  # .cpu().numpy())
                 l = l.item()
                 test_loss.append(l)
-                metric.update(z, it_y)
-                # accs.append(acc)
+                # metric.update(z, it_y)
+                accs.append(metric(z.cpu(), it_y.cpu()))
         it_test_loss = np.mean(test_loss)
-        it_best_acc = metric.compute()
+        # it_best_acc = metric.compute()
+        it_best_acc = np.mean(accs)
         progress.set_postfix(
             {
+                # "lr": scheduler.get_last_lr()[0],
                 "test_loss": it_test_loss,
                 "test_acc": it_best_acc},
             )
