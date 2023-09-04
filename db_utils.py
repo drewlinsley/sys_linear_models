@@ -3,12 +3,15 @@ import os
 import sys
 import json
 import psycopg
-from db_config import DBInfo
+from db_config import DBInfo, CPInfo
 
 
-def get_and_reserve_params():
+def get_and_reserve_params(cp=False):
     # Create a DB
-    db_name = DBInfo().db_name
+    if cp:
+        db_name = CPInfo().db_name
+    else:
+        db_name = DBInfo().db_name
     with psycopg.connect(dbname=db_name, password="postgres", autocommit=True) as con, con.cursor(row_factory=psycopg.rows.dict_row) as cur:
         # res = cur.execute("UPDATE metadata SET reserved=True WHERE id in (SELECT id from metadata WHERE reserved=False ORDER BY random() LIMIT 1) RETURNING *")
         res = cur.execute("UPDATE metadata SET reserved=True WHERE id in (SELECT id from metadata WHERE reserved=False LIMIT 1) RETURNING *")
@@ -16,14 +19,17 @@ def get_and_reserve_params():
     return data
 
 
-def record_performance(results):
+def record_performance(results, cp=False):
     """Update results and set status of the given metadata row."""
-    db_name = DBInfo().db_name
+    if cp:
+        db_name = CPInfo().db_name
+    else:
+        db_name = DBInfo().db_name
     with psycopg.connect(dbname=db_name, password="postgres", autocommit=True) as con, con.cursor(row_factory=psycopg.rows.dict_row) as cur:
         # First update results
         cols = [x for x in results.keys()]
         vals = [x for x in results.values()]
-        query = """INSERT INTO results(%s) VALUES (%%s, %%s, %%s, %%s, %%s, %%s, %%s, %%s, %%s, %%s, %%s, %%s, %%s, %%s); """ % (', '.join(cols))
+        query = """INSERT INTO results(%s) VALUES (%%s, %%s, %%s, %%s, %%s, %%s, %%s, %%s, %%s, %%s, %%s, %%s, %%s, %%s, %%s, %%s); """ % (', '.join(cols))
         cur.execute(query, vals)
 
         # Next update the metadata
@@ -32,9 +38,12 @@ def record_performance(results):
     print("Updated results.")
 
 
-def get_all_results():
+def get_all_results(cp=False):
     """Select results joined with their metadata."""
-    db_name = DBInfo().db_name
+    if cp:
+        db_name = CPInfo().db_name
+    else:
+        db_name = DBInfo().db_name
     with psycopg.connect(dbname=db_name, password="postgres", autocommit=True) as con, con.cursor(row_factory=psycopg.rows.dict_row) as cur:
         query = """SELECT * FROM metadata INNER JOIN results ON results.meta_id = metadata.id;"""
         res = cur.execute(query)
@@ -42,9 +51,12 @@ def get_all_results():
     return data
 
 
-def get_all_meta():
+def get_all_meta(cp=False):
     """Select results joined with their metadata."""
-    db_name = DBInfo().db_name
+    if cp:
+        db_name = CPInfo().db_name
+    else:
+        db_name = DBInfo().db_name
     with psycopg.connect(dbname=db_name, password="postgres", autocommit=True) as con, con.cursor(row_factory=psycopg.rows.dict_row) as cur:
         query = """SELECT * FROM metadata ORDER BY id;"""
         # query = """SELECT * FROM metadata WHERE reserved=True and finished=False ORDER BY id ;"""
@@ -53,9 +65,12 @@ def get_all_meta():
     return data
 
 
-def find_unfinished():
+def find_unfinished(cp=False):
     """Select results joined with their metadata."""
-    db_name = DBInfo().db_name
+    if cp:
+        db_name = CPInfo().db_name
+    else:
+        db_name = DBInfo().db_name
     with psycopg.connect(dbname=db_name, password="postgres", autocommit=True) as con, con.cursor(row_factory=psycopg.rows.dict_row) as cur:
         query = """SELECT * FROM metadata WHERE reserved=True and finished=False ORDER BY id ;"""
         res = cur.execute(query)
@@ -71,10 +86,29 @@ def reset_unfinished():
         res = cur.execute(query)
 
 
+def clean_db():
+    """Delete rows where finished != True."""
+    db_name = DBInfo().db_name
+    with psycopg.connect(dbname=db_name, password="postgres", autocommit=True) as con, con.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        query = """DELETE FROM metadata WHERE finished=False;"""
+        res = cur.execute(query)
+
+
+def dump_db(name):
+    db_name = DBInfo().db_name
+    with psycopg.connect(dbname=db_name, password="postgres", autocommit=True) as con, con.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute("""pg_dump {} > {}.sql""".format(db_name, name))
+
+
 if __name__ == '__main__':
     if len(sys.argv) > 1 and sys.argv[1] == "reset_unfinished":
         reset_unfinished()
         meta = find_unfinished()
+    elif len(sys.argv) > 1 and "dump_" in sys.argv[1]:
+        dump_name = sys.argv[1].split("_")[1]
+        dump_db(dump_name)
+    elif len(sys.argv) > 1 and sys.argv[1] == "clean":
+        clean_db()
     else:
         meta = get_all_meta()
         total = len(meta)

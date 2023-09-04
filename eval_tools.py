@@ -58,7 +58,7 @@ class TinyModel(torch.nn.Module):
         # self.dropout3 = torch.nn.Dropout(0.5)
         self.activation = torch.nn.GELU()
 
-    def forward(self, x):
+    def forward(self, x, penultimate=False):
         x = self.linear1(x)
         if self.linear:
             return x
@@ -69,6 +69,8 @@ class TinyModel(torch.nn.Module):
         # x = self.norm2(x)
         x = self.dropout2(x)
         x = self.activation(x)
+        if penultimate:
+            return x
         # x = self.norm2(x)
         x = self.linear3(x)
         # x = self.dropout3(x)
@@ -85,6 +87,8 @@ def run(
         test_y,
         device,
         width,
+        model=None,  # Allow a model to be passed through for CP control
+        return_data=False,
         bs=6000,  # 32768,
         test_bs=6000,
         epochs=100,
@@ -92,7 +96,7 @@ def run(
         lr=1e-4,
         wd=1e-6,
         rebalance=False,
-        renumber=True,
+        renumber=False,
         sel_train=None,
         sel_test=None,
         eval_data_dir="eval_data",
@@ -159,7 +163,8 @@ def run(
 
     # Hyperparam s
     nc = int(train_y.max() + 1)  # len(np.unique(train_y))  # torch.unique(train_y))
-    model = TinyModel(in_dims=width, out_dims=nc).to("cuda")
+    if model is None:
+        model = TinyModel(in_dims=width, out_dims=nc).to("cuda")
     optimizer = torch.optim.AdamW(
         model.parameters(),
         weight_decay=wd,
@@ -328,7 +333,7 @@ def run(
         "loss": best_loss,
         "loss_std": loss_std, 
     }
-    if kind == "moa":
+    if kind == "moa" and sel_train is not None:
         # Add some rediscovery results
         # Encode training set
         train_loader = torch.utils.data.DataLoader(
@@ -368,19 +373,62 @@ def run(
 
         # How close is Rapamaycin to Rapalogues (other mTOR inhibitors)
         redisc_train_X = train_enc[sel_train]
-        dists = cdist(redisc_train_X, test_enc, metric="euclidean")
-        dists = dists.mean(0)
+        redisc_test_X = test_enc[sel_test]
+        dists_tr = cdist(redisc_train_X, test_enc, metric="cosine")
+        dists_te = cdist(redisc_test_X, test_enc, metric="cosine")
+        dists = np.concatenate((dists_tr, dists_te), 0).mean(0)
+        sims = 1 - dists  # Convert to similarities for z-scores below
         ks = np.asarray([x for x in id_remap.keys()])
         rapa_id = np.where(np.logical_or(ks == "mTOR inhibitor", ks == "mTOR inhibitor|PI3K inhibitor"))[0]
-        cont_id = np.where(ks == "contrast agent")[0][0]
-        rapa_dists = dists[np.in1d(test_y, rapa_id)]
-        cont_dists = dists[test_y == cont_id]
-        norm_d = rapa_dists.mean() / rapa_dists.std() - cont_dists.mean() / cont_dists.std()
-        results["rediscovery_acc"] = norm_d
-        results["rediscovery_z"] = 0.
-        # results["rediscovery_acc_std"] = 0
-        # results["rediscovery_loss_std"] = 0
-    return results
+        # cont_id = np.where(ks == "contrast agent")[0][0]
+        ridx = np.in1d(test_y, rapa_id)
+        nonridx = np.roll(ridx, ridx.sum())  # Roll the index by the number of rapalogues
+        rapa_sims = sims[ridx]  # Rapamycin vs. rapalogue similarity
+        cont_sims = sims[nonridx]  # Rapamycin vs. other similarity
+        raw_dist = rapa_sims.mean() - cont_sims.mean()  # Aiming for positive large values
+        norm_s = (rapa_sims.mean() / rapa_sims.std()) - (cont_sims.mean() / cont_sims.std())
+        results["rediscovery_acc"] = norm_s
+        results["rediscovery_z"] = raw_dist
+
+    if return_data:
+        model.eval()
+        train_loader = torch.utils.data.DataLoader(
+            train_dataset,
+            batch_size=bs,
+            drop_last=False,
+            shuffle=False)
+        train_enc, train_lab = [], []
+        with torch.no_grad():
+            for batch_idx, batch in tqdm(enumerate(train_loader), total=len(train_loader), desc="Processing training data"):
+                it_X, it_y = batch
+                it_X = it_X.to(device)
+                it_y = it_y.to(device)
+                z = model(it_X, penultimate=True)
+                train_enc.append(z)
+                train_lab.append(it_y)
+        train_enc = torch.cat(train_enc).cpu().numpy()
+        train_lab = torch.cat(train_lab).cpu().numpy()
+
+        # Encode test set
+        test_loader = torch.utils.data.DataLoader(
+            test_dataset,
+            batch_size=bs,
+            drop_last=False,
+            shuffle=False)
+        test_enc, test_lab = [], []
+        with torch.no_grad():
+            for batch_idx, batch in tqdm(enumerate(test_loader), total=len(train_loader), desc="Processing training data"):
+                it_X, it_y = batch
+                it_X = it_X.to(device)
+                it_y = it_y.to(device)
+                z = model(it_X, penultimate=True)
+                test_enc.append(z)
+                test_lab.append(it_y)
+        test_enc = torch.cat(test_enc).cpu().numpy()  # Slow but convenient. Consider removing.
+        test_lab = torch.cat(test_lab).cpu().numpy()
+        return results, train_enc, test_enc, train_lab, test_lab
+    else:
+        return results
 
 
 if __name__ == '__main__':

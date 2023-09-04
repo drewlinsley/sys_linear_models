@@ -7,6 +7,10 @@ The goal of this repo is to systematically search through architecture, data, an
 2. Launch workers with `bash run_worker.sh`
 3. Pull db data down to plot and analyze it with `python analyze_db.py`.
 
+4. Create CP database `python generate_db.py --cp --recreate`
+
+# Dump a db
+pg_dump chem_exps > dump_finished-mol-v2.sql
 
 # Specify hyperparameter database
 - Need to design a document (yaml?) that specifies architecture, data, and objective function for a model

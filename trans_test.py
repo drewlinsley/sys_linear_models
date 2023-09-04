@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 
 from functools import partial
+from typing import Tuple, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -29,6 +30,164 @@ from tqdm import tqdm as std_tqdm
 tqdm = partial(std_tqdm, dynamic_ncols=True)
 
 
+class Transformer(nn.Module):
+
+    def forward_with_attention(self, x, y=None, mask=None):
+        attentions = []
+        for layer in self.layers:
+            x, att = layer.forward_with_attention(x, y, mask)
+            attentions.append(att)
+        return x, attentions
+
+    # def forward(self, x, y=None, mask=None):
+    def forward(self, dv, iv_s, iv_b, iv_w, return_p = False, y=None, mask=None):
+        x = dv[:, None]
+        for i, layer in enumerate(self.layers):
+            if i % 2 == 0 and self.enc_dec: # cross
+                x = layer(x, y)
+            elif self.enc_dec:  # self
+                x = layer(x, x, mask)
+            else:  # self or cross
+                x = layer(x, y, mask)
+        out = self.out(x.squeeze(1))
+        b, s, w = 0, 0, 0
+        if return_p:
+            return out, x
+        else:
+            return out, b, s, w
+
+
+    def __init__(self,
+                 input_dim,
+                 int_dim,
+                 output_dim,
+                 n_blocks,
+                 num_embeddings_b,
+                 num_embeddings_s,
+                 # num_embeddings_p,
+                 num_embeddings_w,
+                 embedding_dim_b,
+                 embedding_dim_s,
+                 # embedding_dim_p,
+                 embedding_dim_w,
+                 batch_effect_correct,
+                 objective,
+                 norm_type=nn.BatchNorm1d,  # nn.LayerNorm,  # torch.nn.Identity,  # torch.nn.BatchNorm1d,
+                 use_dropout=0.,
+                 num_heads=2,
+                 num_layers=9,
+                 dim_ref=None,
+                 mlp_ratio=2,
+                 act=lambda x: F.gelu(x, approximate="tanh"),
+                 norm_layer: nn.Module = nn.LayerNorm):
+        super(Transformer, self).__init__()
+        dim_self = 878
+        self.enc_dec = False
+        dim_ref = dim_ref if dim_ref is not None else dim_self
+        layers = []
+        for i in range(num_layers):
+            if i % 2 == 0 and self.enc_dec:  # cross
+                layers.append(TransformerLayer(dim_self, dim_ref, num_heads, mlp_ratio, act=act, norm_layer=norm_layer))
+            elif self.enc_dec:  # self
+                layers.append(TransformerLayer(dim_self, dim_self, num_heads, mlp_ratio, act=act, norm_layer=norm_layer))
+            else:  # self or cross
+                layers.append(TransformerLayer(dim_self, dim_ref, num_heads, mlp_ratio, act=act, norm_layer=norm_layer))
+        self.layers = nn.ModuleList(layers)
+        self.out = torch.nn.Linear(dim_ref, output_dim)
+
+
+class TransformerLayer(nn.Module):
+
+    def forward_with_attention(self, x, y=None, mask=None):
+        x_, attention = self.attn(self.norm1(x), y, mask)
+        x = x + x_
+        x = x + self.mlp(self.norm2(x))
+        return x, attention
+
+    def forward(self, x, y=None, mask=None):
+        x = x + self.attn(self.norm1(x), y, mask)[0]
+        x = x + self.mlp(self.norm2(x))
+        return x
+
+    def __init__(self, dim_self, dim_ref, num_heads, mlp_ratio=4., bias=False, dropout=0., act=lambda x: F.gelu(x, approximate="tanh"),
+                 norm_layer: nn.Module = nn.LayerNorm):
+        super().__init__()
+        self.norm1 = norm_layer(dim_self)
+        self.attn = MultiHeadAttention(dim_self, dim_ref, num_heads, bias=bias, dropout=dropout)
+        self.norm2 = norm_layer(dim_self)
+        self.mlp = MlpTransformer(dim_self, int(dim_self * mlp_ratio), act=act, dropout=dropout)
+
+
+class MultiHeadAttention(nn.Module):
+
+    def __init__(self, dim_self, dim_ref, num_heads, bias=True, dropout=0.):
+        super().__init__()
+        self.num_heads = num_heads
+        head_dim = dim_self // num_heads
+        self.scale = head_dim ** -0.5
+        self.to_queries = nn.Linear(dim_self, dim_self, bias=bias)
+        self.to_keys_values = nn.Linear(dim_ref, dim_self * 2, bias=bias)
+        # self.q_norm = nn.LayerNorm(dim_self, elementwise_affine=True)
+        # self.k_norm = nn.LayerNorm(dim_self * 2, elementwise_affine=True)
+        self.project = nn.Linear(dim_self, dim_self)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x, y=None, mask=None):
+        y = y if y is not None else x
+        b, n, c = x.shape
+        _, m, d = y.shape
+        # # b n h dh
+        queries = self.to_queries(x).reshape(b, n, self.num_heads, c // self.num_heads)
+        # queries = self.q_norm(self.to_queries(x)).reshape(b, n, self.num_heads, c // self.num_heads)
+        # # b m 2 h dh
+        keys_values = self.to_keys_values(y).reshape(b, m, 2, self.num_heads, c // self.num_heads)
+        # keys_values = self.k_norm(self.to_keys_values(y)).reshape(b, m, 2, self.num_heads, c // self.num_heads)
+        keys, values = keys_values[:, :, 0], keys_values[:, :, 1]
+        attention = torch.einsum('bnhd,bmhd->bnmh', queries, keys) * self.scale
+        if mask is not None:
+            if mask.dim() == 2:
+                mask = mask.unsqueeze(1)
+            attention = attention.masked_fill(mask.unsqueeze(3), float("-inf"))
+        attention = attention.softmax(dim=2)
+        out = torch.einsum('bnmh,bmhd->bnhd', attention, values).reshape(b, n, c)
+        out = self.project(out)
+        return out, attention
+
+
+class MLP(nn.Module):
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.model(x)
+
+    def __init__(self, sizes: Tuple[int, ...], bias=True, act=nn.GELU):
+        super(MLP, self).__init__()
+        layers = []
+        for i in range(len(sizes) - 1):
+            layers.append(nn.Linear(sizes[i], sizes[i + 1], bias=bias))
+            if i < len(sizes) - 2:
+                layers.append(act())
+                layers.append(nn.LayerNorm(sizes[i + 1], elementwise_affine=True))
+        self.model = nn.Sequential(*layers)
+
+
+class MlpTransformer(nn.Module):
+    def __init__(self, in_dim, h_dim, out_d: Optional[int] = None, act=lambda x: F.gelu(x, approximate="tanh"), dropout=0.):
+        super().__init__()
+        out_d = out_d if out_d is not None else in_dim
+        self.fc1 = nn.Linear(in_dim, h_dim)
+        self.act = act
+        self.fc2 = nn.Linear(h_dim, out_d)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        x = self.fc1(x)
+        x = self.act(x)
+        x = self.dropout(x)
+        x = self.fc2(x)
+        x = self.dropout(x)
+        return x
+
+
 class Mmd_resnet(nn.Module):   
     def __init__(self, 
                  input_dim,
@@ -42,11 +201,11 @@ class Mmd_resnet(nn.Module):
                  embedding_dim_b,
                  embedding_dim_s,
                  # embedding_dim_p,
-                 # embedding_dim_w,
+                 embedding_dim_w,
                  batch_effect_correct,
                  objective,
                  norm_type=nn.BatchNorm1d,  # nn.LayerNorm,  # torch.nn.Identity,  # torch.nn.BatchNorm1d,
-                 use_dropout=0.1):
+                 use_dropout=0.):
         super(Mmd_resnet, self).__init__()    
 
         self.n_blocks = n_blocks
@@ -59,30 +218,8 @@ class Mmd_resnet(nn.Module):
                     num_embeddings=num_embeddings_s,
                     embedding_dim=embedding_dim_s),
                 torch.nn.Linear(embedding_dim_s, embedding_dim_s),
-                norm_type(embedding_dim_s),
-                torch.nn.GELU(),
-                # norm_type(embedding_dim_s)
+                norm_type(embedding_dim_s)
             ])
-            self.embedding_b = nn.Sequential(*[
-                torch.nn.Embedding(
-                    num_embeddings=num_embeddings_b,
-                    embedding_dim=embedding_dim_b),
-                torch.nn.Linear(embedding_dim_b, embedding_dim_b),
-                norm_type(embedding_dim_b),
-                torch.nn.GELU(),
-                # norm_type(embedding_dim_s)
-            ])
-            self.s_layers = []
-            for l in range(self.n_blocks):
-                self.s_layers.append(nn.Sequential(*[
-                    torch.nn.Linear(embedding_dim_s + embedding_dim_b, embedding_dim_s + embedding_dim_b),
-                    # torch.nn.Dropout(use_dropout),
-                    # torch.nn.GELU(),
-                    norm_type(embedding_dim_s + embedding_dim_b),
-                    torch.nn.GELU(),
-                ]))
-            self.s_layers = nn.ModuleList(self.s_layers)
-
         self.proj = nn.Sequential(*[
             nn.Linear(input_dim, int_dim),
             norm_type(int_dim)
@@ -92,19 +229,19 @@ class Mmd_resnet(nn.Module):
         for l in range(self.n_blocks):
             if self.batch_effect_correct:
                 self.dv_layers.append(nn.Sequential(*[
-                    torch.nn.Linear(int_dim + embedding_dim_s + embedding_dim_b, int_dim),
-                    norm_type(int_dim),  # BatchNorm1d(dim),
+                    torch.nn.Linear(int_dim + embedding_dim_s, int_dim),
                     torch.nn.Dropout(use_dropout),
-                    torch.nn.GELU(),
                     # norm_type(int_dim),  # BatchNorm1d(dim),
+                    torch.nn.GELU(),
+                    norm_type(int_dim),  # BatchNorm1d(dim),
                 ]))
             else:
                 self.dv_layers.append(nn.Sequential(*[
                     torch.nn.Linear(int_dim, int_dim),
-                    norm_type(int_dim),  # BatchNorm1d(dim),
                     torch.nn.Dropout(use_dropout),
-                    torch.nn.GELU(),
                     # norm_type(int_dim),  # BatchNorm1d(dim),
+                    torch.nn.GELU(),
+                    norm_type(int_dim),  # BatchNorm1d(dim),
                 ]))
         self.dv_layers = nn.ModuleList(self.dv_layers)
         if objective == "barlow":
@@ -141,16 +278,11 @@ class Mmd_resnet(nn.Module):
         """Forward function (with skip connections)"""
         y = self.proj(dv)
         if self.batch_effect_correct:
-            it_s = self.embedding_s(iv_s).squeeze(1)
-            it_b = self.embedding_b(iv_b).squeeze(1)
-            it_s = torch.cat((it_s, it_b), 1)
+            x_s = self.embedding_s(iv_s).squeeze(1)
         for l in range(self.n_blocks):
             dv_layer = self.dv_layers[l]
             if self.batch_effect_correct:
-                it_s = self.s_layers[l](it_s)
-                # x_s = self.s_layers[l](x_s)
-                # cat_y = torch.concat((y, x_s), 1)
-                cat_y = torch.concat((y, it_s), 1)
+                cat_y = torch.concat((y, x_s), 1)
             else:
                 cat_y = y
             if l % 2:  # Skip
@@ -195,10 +327,10 @@ def main(
 
         # Defaults below are fixed
         epochs=2000,  # 500,
-        warmup_steps=100,  # 50,
-        warmup_epochs=5,
+        warmup_steps=50,
+        warmup_epochs=50,
         early_stopping=True,
-        stop_criterion=10,  # 16,
+        stop_criterion=20,  # 16,
         test_epochs=500,
         version=24,
         inchi_key="ZWYQUVBAZLHTHP-UHFFFAOYSA-N",
@@ -234,18 +366,16 @@ def main(
     # Handle label and data prop at the same time
     train_compounds, train_res, train_source, train_batch, train_well, sel_train = model_utils.prepare_labels(train_compounds, train_res, train_source, train_batch, train_well, sel_train, objective, label_prop=label_prop, data_prop=data_prop, reference=test_compounds)
     # test_compounds, test_res, test_source, test_batch, test_well = model_utils.prepare_labels(test_compounds, test_res, test_source, test_batch, test_well, objective, label_prop, reference=train_compounds)
-    print(np.unique(train_compounds).shape)
-    os._exit(1)
 
     # # Handle data prop - Always use full test set
     # train_compounds, train_res, train_source, train_batch, train_well = model_utils.prepare_data(train_compounds, train_res, train_source, train_batch, train_well, data_prop)
     bs = min(len(train_compounds), bs)  # Adjust so we dont overestimate batch
 
     # Default params
-    emb_dim_b = 16  # 64
+    emb_dim_b = 64
     emb_dim_s = 16  # 4
-    # emb_dim_p = 16  # 64  # 16
-    # emb_dim_w = 16  # 128  # 16
+    emb_dim_p = 16
+    emb_dim_w = 16
     num_embeddings_b = train_batch.max() + 1  # train_batch.shape[-1]
     num_embeddings_s = train_source.max() + 1  # train_source.shape[-1]
     num_embeddings_w = train_well.max() + 1  # train_well.shape[-1]
@@ -267,13 +397,13 @@ def main(
     tops = 10  # top-K classification accuracy
     nc = len(np.unique(train_compounds))
 
-    # Inverse weighting for sampling
-    uni_c, class_sample_count = np.unique(train_compounds, return_counts=True)
-    weight = 1. / class_sample_count
-    weight_dict = {k: v for k, v in zip(uni_c, weight)}
-    samples_weight = np.array([weight_dict[t] for t in train_compounds])
-    samples_weight = torch.from_numpy(samples_weight)
-    sampler = WeightedRandomSampler(samples_weight, len(samples_weight))
+    # # Inverse weighting for sampling
+    # uni_c, class_sample_count = np.unique(train_compounds, return_counts=True)
+    # weight = 1. / class_sample_count
+    # weight_dict = {k: v for k, v in zip(uni_c, weight)}
+    # samples_weight = np.array([weight_dict[t] for t in train_compounds])
+    # samples_weight = torch.from_numpy(samples_weight)
+    # sampler = WeightedRandomSampler(samples_weight, len(samples_weight))
 
     # Build data
     train_res = torch.Tensor(train_res).float()
@@ -298,13 +428,12 @@ def main(
         test_source,
         test_batch,
         test_well)
-    # sampler = ImbalancedDatasetSampler(train_dataset)
+    sampler = ImbalancedDatasetSampler(train_dataset)
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
         drop_last=True,
         batch_size=bs,
-        shuffle=True,
-        # sampler=sampler,
+        sampler=sampler,
         pin_memory=True)  # Remove pin memory if using accelerate
     test_loader = torch.utils.data.DataLoader(
         test_dataset,
@@ -314,7 +443,7 @@ def main(
         pin_memory=False)
 
     # Build model etc
-    model = Mmd_resnet(
+    model = Transformer(
         input_dim,
         width,
         output_dim,
@@ -325,46 +454,40 @@ def main(
         num_embeddings_s=num_embeddings_s,
         num_embeddings_w=num_embeddings_w,
         embedding_dim_b=emb_dim_b,
-        embedding_dim_s=emb_dim_s)
-        # embedding_dim_w=emb_dim_w)
+        embedding_dim_s=emb_dim_s,
+        embedding_dim_w=emb_dim_w)
     optimizer = torch.optim.AdamW(
         model.parameters(),
-        weight_decay=1e-6,  # Default
+        weight_decay=1e-4,  # Default
         lr=lr)  # ,
-    # scheduler = get_cosine_schedule_with_warmup(  # get_linear_schedule_with_warmup(
-    #     optimizer,
-    #     num_warmup_steps=warmup_steps,
-    #     num_training_steps=epochs * int(len(train_loader) // bs)
-    # )
+    scheduler = get_cosine_schedule_with_warmup(  # get_linear_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps=warmup_steps,
+        num_training_steps=epochs * int(len(train_loader) // bs)
+    )
 
     # Objective function
     obj_fun = model_utils.get_obj_fun(objective)
-    # model, optimizer, train_loader, test_loader, scheduler = accelerator.prepare(
-    #     model,
-    #     optimizer,
-    #     train_loader,
-    #     test_loader,
-    #     scheduler)
-    model, optimizer, train_loader, test_loader = accelerator.prepare(
+    model, optimizer, train_loader, test_loader, scheduler = accelerator.prepare(
         model,
         optimizer,
         train_loader,
-        test_loader)
+        test_loader,
+        scheduler)
     # model.to(device)
     avg_loss = torch.tensor(0).float().to(device)
 
     if cell_profiler:
         # Pass orginal normalized encodings
-        train_enc = train_res.cpu().numpy()
-        train_lab = train_compounds.cpu().numpy()
-        test_enc = test_res.cpu().numpy()
-        test_lab = test_compounds.cpu().numpy()
+        train_enc = train_res
+        train_lab = train_compounds
+        test_enc = test_res
+        test_lab = test_compounds
         best_loss = -1  # Dummy
         width = train_res.shape[1]
         print("Skipping training — using cell profiler instead.")
     else:
         if ckpt is not None:
-            print("Using existing path {}".format(ckpt))
             path = ckpt
         else:
             # accelerator.wait_for_everyone()
@@ -404,7 +527,7 @@ def main(
                     accelerator.backward(loss)
                     # loss.backward()
                     optimizer.step()
-                    # scheduler.step()  # Lets go without a scheduler for now
+                    scheduler.step()  # Lets go without a scheduler for now
                     batch_losses.append(loss)
                     progress.set_postfix({"train_loss": loss})  # , "compounds": comp_loss, "phenotypes": pheno_loss})
                     progress.update()
@@ -470,7 +593,7 @@ def main(
         print('Begin evaluation')
         train_loader = torch.utils.data.DataLoader(
             train_dataset,
-            batch_size=bs,
+            batch_size=bs * 2,
             drop_last=False,
             shuffle=False)
         # train_loader = accelerator.prepare(train_loader)
@@ -498,7 +621,7 @@ def main(
         # Encode test set
         test_loader = torch.utils.data.DataLoader(
             test_dataset,
-            batch_size=bs,
+            batch_size=bs * 2,
             drop_last=False,
             shuffle=False)
         # test_loader = accelerator.prepare(test_loader)
@@ -555,16 +678,10 @@ def main(
             pos_crispr_emb, neg_crispr_emb = pos_crispr_emb.cpu(), neg_crispr_emb.cpu()
 
     # Compute z primes (Actually just a measure of separability...)
-    orf_ds = cdist(pos_orf_emb, neg_orf_emb, metric="cosine").mean(1)
-    crispr_ds = cdist(pos_crispr_emb, neg_crispr_emb, metric="cosine").mean(1)
-    d_orf = orf_ds.mean()
-    d_crispr = crispr_ds.mean()
+    orf_ds = cdist(pos_orf_emb, neg_orf_emb, metric="euclidean").mean(1)
+    crispr_ds = cdist(pos_crispr_emb, neg_crispr_emb, metric="euclidean").mean(1)
     z_prime_orf = orf_ds.mean() / orf_ds.std()
     z_prime_crispr = crispr_ds.mean() / crispr_ds.std()
-
-    # Free up memory
-    del model
-    torch.cuda.empty_cache()
 
     # Run MoA test
     moa_perf = eval_tools.run(kind="moa", train_X=train_enc, train_y=train_lab, test_X=test_enc, test_y=test_lab, device=device, epochs=test_epochs, width=width, sel_train=sel_train, sel_test=sel_test)
@@ -587,9 +704,7 @@ def main(
         "rediscovery_acc": moa_perf["rediscovery_acc"],
         "rediscovery_z": moa_perf["rediscovery_z"],
         "z_prime_orf": z_prime_orf,
-        "z_prime_crispr": z_prime_crispr,
-        "d_orf": d_orf,
-        "d_crispr": d_crispr
+        "z_prime_crispr": z_prime_crispr
     }
     db_utils.record_performance(results)
 
@@ -609,17 +724,17 @@ if __name__ == '__main__':
     if args.debug:
         # Run in debug mode
         params = {
-            "id": -30,
+            "id": -1,
             "data_prop": 1.,
-            "label_prop": .5,
+            "label_prop": 1.,
             "objective": "mol_class",
             "lr": 1e-4,
             "bs": [6000][0],
             "moa": [True][0],
             "target": [True][0],
-            "layers": 9,
-            "width": 1512,
-            "batch_effect_correct": [True, False][0],
+            "layers": 6,
+            "width": 1024,
+            "batch_effect_correct": [True, False][1],
             "cell_profiler": False
         }
     else:

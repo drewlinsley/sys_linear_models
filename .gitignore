@@ -1,3 +1,6 @@
+embedding_data/
+results/
+*.sql
 joblib*
 repurposing_drugs_20200324_cleaned.txt.gz
 *.pt
