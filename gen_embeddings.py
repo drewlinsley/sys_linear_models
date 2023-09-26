@@ -13,7 +13,6 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 from torch.optim import lr_scheduler
-from torch.utils.data.sampler import WeightedRandomSampler
 
 from transformers import GPT2Tokenizer, GPT2LMHeadModel, AdamW, get_linear_schedule_with_warmup, get_cosine_schedule_with_warmup
 from accelerate import Accelerator
@@ -21,7 +20,6 @@ from accelerate import Accelerator
 import db_utils
 import model_utils
 import eval_tools
-from torchsampler import ImbalancedDatasetSampler
 
 from scipy.spatial.distance import cdist
 
@@ -228,6 +226,7 @@ def main(
     orf_data, orf_source, orf_batch, orf_well = data["orf_data"], data["orf_source"], data["orf_batch"], data["orf_well"]
     crispr_data, crispr_source, crispr_batch, crispr_well = data["crispr_data"], data["crispr_source"], data["crispr_batch"], data["crispr_well"]
     orfs, crisprs = data["orfs"], data["crisprs"]
+    crispr_id = np.unique(crisprs, return_inverse=True)[1]
 
     # Handle label and data prop at the same time
     train_compounds, train_res, train_source, train_batch, train_well, sel_train = model_utils.prepare_labels(train_compounds, train_res, train_source, train_batch, train_well, sel_train, objective, label_prop=label_prop, data_prop=data_prop, reference=test_compounds)
@@ -263,14 +262,6 @@ def main(
     tops = 10  # top-K classification accuracy
     nc = len(np.unique(train_compounds))
 
-    # Inverse weighting for sampling
-    uni_c, class_sample_count = np.unique(train_compounds, return_counts=True)
-    weight = 1. / class_sample_count
-    weight_dict = {k: v for k, v in zip(uni_c, weight)}
-    samples_weight = np.array([weight_dict[t] for t in train_compounds])
-    samples_weight = torch.from_numpy(samples_weight)
-    sampler = WeightedRandomSampler(samples_weight, len(samples_weight))
-
     # Build data
     train_res = torch.Tensor(train_res).float()
     train_source = torch.Tensor(train_source).long()
@@ -282,6 +273,11 @@ def main(
     test_batch = torch.Tensor(test_batch).long()
     test_well = torch.Tensor(test_well).long()
     test_compounds = torch.Tensor(test_compounds).long()
+    crispr_data = torch.Tensor(crispr_data).float()
+    crispr_source = torch.Tensor(crispr_source).long()
+    crispr_batch = torch.Tensor(crispr_batch).long()
+    crispr_well = torch.Tensor(crispr_well).long()
+    crispr_compounds = torch.Tensor(crispr_id).long()
     train_dataset = torch.utils.data.TensorDataset(
         train_res,
         train_compounds,
@@ -294,16 +290,26 @@ def main(
         test_source,
         test_batch,
         test_well)
-    # sampler = ImbalancedDatasetSampler(train_dataset)
+    crispr_dataset = torch.utils.data.TensorDataset(
+        crispr_data,
+        crispr_compounds,
+        crispr_source,
+        crispr_batch,
+        crispr_well)
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
-        drop_last=True,
+        drop_last=False,
         batch_size=bs,
-        shuffle=True,
-        # sampler=sampler,
-        pin_memory=True)  # Remove pin memory if using accelerate
+        shuffle=False,
+        pin_memory=False)  # Remove pin memory if using accelerate
     test_loader = torch.utils.data.DataLoader(
         test_dataset,
+        batch_size=bs,
+        drop_last=False,
+        shuffle=False,
+        pin_memory=False)
+    crispr_loader = torch.utils.data.DataLoader(
+        crispr_dataset,
         batch_size=bs,
         drop_last=False,
         shuffle=False,
@@ -316,6 +322,8 @@ def main(
         train_lab = train_compounds.cpu().numpy()
         test_enc = test_res.cpu().numpy()
         test_lab = test_compounds.cpu().numpy()
+        crispr_enc = crispr_data.cpu().numpy()
+        crispr_lab = crispr_compounds.cpu().numpy()
         best_loss = -1  # Dummy
         width = train_res.shape[1]
         print("Skipping training — using cell profiler instead.")
@@ -376,13 +384,45 @@ def main(
         test_enc = torch.cat(test_enc).cpu().numpy()  # Slow but convenient. Consider removing.
         test_lab = torch.cat(test_lab).cpu().numpy()
 
+        crispr_enc, crispr_lab = [], []
+        with torch.no_grad():
+            for batch_idx, batch in tqdm(enumerate(crispr_loader), total=len(crispr_loader), desc="Processing crispr data"):
+                dv, text_embeddings, iv_s, iv_b, iv_w = batch
+
+                # # Preprocess data for some model approaches
+                # dv, text_embeddings, mask = model_utils.preprocess(dv, text_embeddings, objective, label_prop)
+
+                # Move data to GPU. Only needed when we dont use accelerate
+                dv = dv.to(device)
+                text_embeddings = text_embeddings.to(device)
+                iv_b = iv_b.to(device)
+                iv_s = iv_s.to(device)
+                iv_w = iv_w.to(device)
+
+                _, image_embeddings = model(dv=dv, iv_s=iv_s, iv_b=iv_b, iv_w=iv_w, return_p=True)
+                crispr_enc.append(image_embeddings)
+                crispr_lab.append(text_embeddings)
+        crispr_enc = torch.cat(crispr_enc).cpu().numpy()  # Slow but convenient. Consider removing.
+        crispr_lab = torch.cat(crispr_lab).cpu().numpy()
+
     if kind == "mol":
         pass
     else:
         target_perf, train_enc, test_enc, train_lab, test_lab = eval_tools.run(kind=kind, train_X=train_enc, train_y=train_lab, test_X=test_enc, test_y=test_lab, device=device, epochs=test_epochs, width=width, return_data=True)
     path = os.path.join("embedding_data", "{}_{}.npz".format(kind, title))
-    np.savez(path, train_enc=train_enc, test_enc=test_enc, train_lab=train_lab, test_lab=test_lab)
+    np.savez(path, train_enc=train_enc, test_enc=test_enc, train_lab=train_lab, test_lab=test_lab, crispr_enc=crispr_enc, crispr_lab=crispr_lab)
     print("Saved {}".format(path))
+    print("Exit now if you don't want validation")
+
+    del model
+    torch.cuda.empty_cache()
+
+    # Run MoA test
+    if 0:  # kind == "mol" and not cell_profiler:
+        # Need to pass the correct train_lab back
+        moa_perf, train_enc, test_enc, train_lab_moa, test_lab_moa, crispr_enc = eval_tools.run(kind="target", train_X=train_enc, train_y=train_lab, test_X=test_enc, test_y=test_lab, device=device, epochs=test_epochs, width=width, sel_train=sel_train, sel_test=sel_test, crispr_data=crispr_enc, return_data=True)
+        np.savez(path, train_enc=train_enc, test_enc=test_enc, train_lab=train_lab, train_lab_moa=train_lab_moa, test_lab_moa=test_lab_moa, test_lab=test_lab, crispr_enc=crispr_enc, crispr_lab=crispr_lab)
+        print(moa_perf)
 
     
 if __name__ == '__main__':
@@ -398,8 +438,8 @@ if __name__ == '__main__':
         assert args.ckpt is not None, "Pass a checkpoint"
     assert args.title is not None, "Pass a title"
     params = {
-        "id": -20,
-        "data_prop": .75,
+        "id": -40,
+        "data_prop": 1.,
         "label_prop": 1.,
         "objective": "mol_class",
         "lr": 1e-4,

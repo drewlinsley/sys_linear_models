@@ -607,9 +607,9 @@ if __name__ == '__main__':
     if args.debug:
         # Run in debug mode
         params = {
-            "id": -30,
+            "id": -40,
             "data_prop": 1.,
-            "label_prop": .5,
+            "label_prop": 1.,
             "objective": "mol_class",
             "lr": 1e-4,
             "bs": [6000][0],

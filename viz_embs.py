@@ -9,7 +9,7 @@ import matplotlib as mpl
 # sns.set(style='white', context='notebook', rc={'figure.figsize':(14,10)})
 
 
-kind = "mol"
+kind = "target"
 ddir = "embedding_data"
 eval_data_dir = "eval_data"
 plot_cp = False

@@ -88,6 +88,7 @@ def run(
         device,
         width,
         model=None,  # Allow a model to be passed through for CP control
+        crispr_data=None,
         return_data=False,
         bs=6000,  # 32768,
         test_bs=6000,
@@ -201,6 +202,11 @@ def run(
     test_dataset = torch.utils.data.TensorDataset(
         pt_test_X,
         pt_test_Y)
+    if crispr_data is not None:
+        pt_crispr_X = torch.from_numpy(crispr_data).float()
+        crispr_dataset = torch.utils.data.TensorDataset(
+            pt_crispr_X)
+        
     # sampler = ImbalancedDatasetSampler(train_dataset)
     bs = min(bs, len(train_dataset))
     test_bs = min(test_bs, len(test_dataset))
@@ -417,7 +423,7 @@ def run(
             shuffle=False)
         test_enc, test_lab = [], []
         with torch.no_grad():
-            for batch_idx, batch in tqdm(enumerate(test_loader), total=len(train_loader), desc="Processing training data"):
+            for batch_idx, batch in tqdm(enumerate(test_loader), total=len(test_loader), desc="Processing testing data"):
                 it_X, it_y = batch
                 it_X = it_X.to(device)
                 it_y = it_y.to(device)
@@ -426,7 +432,23 @@ def run(
                 test_lab.append(it_y)
         test_enc = torch.cat(test_enc).cpu().numpy()  # Slow but convenient. Consider removing.
         test_lab = torch.cat(test_lab).cpu().numpy()
-        return results, train_enc, test_enc, train_lab, test_lab
+        if crispr_data is not None:
+            crispr_loader = torch.utils.data.DataLoader(
+                crispr_dataset,
+                batch_size=bs,
+                drop_last=False,
+                shuffle=False)
+            crispr_enc = []
+            with torch.no_grad():
+                for batch_idx, batch in tqdm(enumerate(crispr_loader), total=len(crispr_loader), desc="Processing crispr data"):
+                    it_X = batch[0]
+                    it_X = it_X.to(device)
+                    z = model(it_X, penultimate=True)
+                    crispr_enc.append(z)
+            crispr_enc = torch.cat(crispr_enc).cpu().numpy()  # Slow but convenient. Consider removing.
+            return results, train_enc, test_enc, train_lab, test_lab, crispr_enc
+        else:
+            return results, train_enc, test_enc, train_lab, test_lab
     else:
         return results
 

@@ -29,14 +29,23 @@ def get_aux_data(idf, counts, dcounts):
     return idf
 
 
-def fig_scale_data_labels(dv, ylim, text=True, agg="max"):
+def func(x, a, b):
+    return (a / x) ** -b
+from scipy.optimize import curve_fit
+
+
+def fig_scale_data_labels(dv, ylim, text=True, agg="max", powerlaw=False, data="all"):
     f, axs = plt.subplots(1, 1)
-    plt.axhline(cp_data[dv].values, color="black", linestyle='--', lw=1)
-    plt.axhline(cp_df[dv].max(), color="black", linestyle='--', lw=1)
-    rect = plt.Rectangle((0, cp_data[dv].values.tolist()[0]), 800000, (cp_df[dv].max() - cp_data[dv].values)[0], color='black', alpha=0.05)
-    axs.add_patch(rect)
+    if data.lower() == "cp":
+        df = cp_df
+    if data.lower() != "cp":
+        plt.axhline(cp_data[dv].values, color="black", linestyle='--', lw=1)
+        plt.axhline(cp_df[dv].max(), color="black", linestyle='--', lw=1)
+        rect = plt.Rectangle((0, cp_data[dv].values.tolist()[0]), 800000, (cp_df[dv].max() - cp_data[dv].values)[0], color='black', alpha=0.05)
+        axs.add_patch(rect)
     if text:
-        plt.text(50000, cp_data[dv].values + 1, "Recursion (Cellprofiler)")
+        if data.lower() != "cp":
+            plt.text(50000, cp_data[dv].values + 1, "Recursion (Cellprofiler)")
         sns.lineplot(data=df, x="total_data", y=dv, hue="label_prop", palette=palette, ax=axs, estimator=agg)
     else:
         sns.lineplot(data=df, x="total_data", y=dv, hue="label_prop", palette=palette, ax=axs, estimator=agg, legend=False)
@@ -49,22 +58,83 @@ def fig_scale_data_labels(dv, ylim, text=True, agg="max"):
         rd = df.groupby(["label_prop"]).agg(agg).reset_index()
     X = np.stack((rd.total_data.values, rd.label_prop.values), 1)
     rd["adj_labels"]=(rd.total_data - 118949)
-    m = sm.ols(formula="{} ~ adj_labels".format(dv), data=rd).fit()
-    intercept = m.params.Intercept
-    slope = m.params.adj_labels
+    if powerlaw:
+        # fit = np.polyfit(rd["adj_labels"], rd[dv], 1)
+        # slope, intercept = fit
+        popt, pcov = curve_fit(func, rd["adj_labels"], rd[dv], method="dogbox")
+    else:
+        m = sm.ols(formula="{} ~ adj_labels".format(dv), data=rd).fit()
+        intercept = m.params.Intercept
+        slope = m.params.adj_labels
 
     # slope, intercept, r_value, p_value, std_err = linregress(rd.label_prop, rd.target_acc)
     # y_predicted = slope * rd.total_data + intercept
-    final_predicted = slope * (rd.adj_labels.max() + 800000) + intercept
-    plt.plot([0, rd.adj_labels.max() + 800000], [intercept, final_predicted], color="#c90657", linestyle="-", lw=1, alpha=0.5)
+    if powerlaw:
+        first_predicted = func(rd["adj_labels"].min(), popt[0], popt[1])
+        final_predicted = func(rd["adj_labels"].max(), popt[0], popt[1]) 
+        plt.plot([0, rd.adj_labels.max() + 800000], [first_predicted, final_predicted], color="#c90657", linestyle="-", lw=1, alpha=0.5)
+    else:
+        final_predicted = slope * (rd.adj_labels.max() + 800000) + intercept
+        plt.plot([0, rd.adj_labels.max() + 800000], [intercept, final_predicted], color="#c90657", linestyle="-", lw=1, alpha=0.5)
     # rd.total_data, y_predicted, "k--")
 
     chance = 100 * (1/1282.)
     # plt.axhline(chance, color="black", linestyle='--', lw=1, alpha=0.5)
     # plt.text(50000, chance + 1, "Chance")
+    # plt.annotate("$Accuracy = {:.2e} * (# of Novel Molecules) + {:.2f}$".format(Decimal(slope)), xy=(50000, 75))
+    print("$Accuracy = {:.2e} * (# of Novel Molecules) + {:.2f}$".format(Decimal(slope)))
+    plt.xlim([0, 800000])
+    plt.ylim(ylim)
     if text:
-        plt.text(50000, cp_df[dv].agg(agg) - 10, "Accuracy = {:.2e} * (# of Novel Molecules) + {:.2f}".format(Decimal(slope), intercept))
+        plt.legend(loc='center right')
+    plt.ylabel("{} deconvolution accuracy".format(dv))
+    plt.xlabel("Total number of training phenotypes")
+    plt.xticks(rotation = -30)
+    axs.spines['top'].set_visible(False)
+    axs.spines['right'].set_visible(False)
+    if data.lower() != "cp":
+        plt.savefig(os.path.join(results_dir, "fig_{}_scale_data_labels_text_{}.png".format(dv, text)), dpi=300)
+    else:
+        plt.savefig(os.path.join(results_dir, "cp_fig_{}_scale_data_labels_text_{}.png".format(dv, text)), dpi=300)
+    plt.show()
+    plt.close(f)
+
+
+def fig_scale_data_fits(dv, ylim, text=True, agg="max", data="all"):
+    f, axs = plt.subplots(1, 1)
+    if data.lower() == "cp":
+        df = cp_df
+    if text:
+        if data.lower() != "cp":
+            plt.text(50000, cp_data[dv].values + 1, "Recursion (Cellprofiler)")
+        sns.lineplot(data=df, x="total_data", y=dv, hue="label_prop", palette=palette, ax=axs, estimator=agg, alpha=0.2)
+    else:
+        sns.lineplot(data=df, x="total_data", y=dv, hue="label_prop", palette=palette, ax=axs, estimator=agg, legend=False, alpha=0.2)
+
+    if agg != "max":
+        v = df.groupby(["label_prop", "data_prop"]).agg(agg).reset_index()[dv]
+        rd = df.groupby(["label_prop", "data_prop"]).agg("max").reset_index()
+        rd[dv] = v
+    else:
+        rd = df.groupby(["label_prop", "data_prop"]).agg(agg).reset_index()
+    X = np.stack((rd.total_data.values, rd.label_prop.values), 1)
+    # rd["adj_labels"]=(rd.total_data - 118949)
+    rd["adj_labels"] = rd.total_data
+
+    # Seperate fits for each data_prop
+    fits = {}
+    for d in np.sort(rd.data_prop.unique()):
+        m = sm.ols(formula="{} ~ adj_labels".format(dv), data=rd[rd.data_prop == d]).fit()
+        intercept = m.params.Intercept
+        slope = m.params.adj_labels
+        fits[d] = [intercept, slope]
         print("Accuracy = {:.2e} * (# of Novel Molecules) + {:.2f}".format(Decimal(slope), intercept))
+        final_predicted = slope * (rd[rd.data_prop == d].adj_labels.max() + 800000) + intercept
+        plt.plot([0, rd[rd.data_prop == d].adj_labels.max() + 800000], [intercept, final_predicted], color="#c90657", linestyle="-", lw=1, alpha=0.5)
+
+    # chance = 100 * (1/1282.)
+    # plt.axhline(chance, color="black", linestyle='--', lw=1, alpha=0.5)
+    # plt.text(50000, chance + 1, "Chance")
     # plt.annotate("$Accuracy = {:.2e} * (# of Novel Molecules) + {:.2f}$".format(Decimal(slope)), xy=(50000, 75))
     plt.xlim([0, 800000])
     plt.ylim(ylim)
@@ -75,34 +145,43 @@ def fig_scale_data_labels(dv, ylim, text=True, agg="max"):
     plt.xticks(rotation = -30)
     axs.spines['top'].set_visible(False)
     axs.spines['right'].set_visible(False)
-    plt.savefig(os.path.join(results_dir, "fig_{}_scale_data_labels_text_{}.png".format(dv, text)), dpi=300)
+    if data.lower() == "cp":
+        plt.savefig(os.path.join(results_dir, "fig_{}_multi_data_fits_text_{}.png".format(dv, text)), dpi=300)
+    else:
+        plt.savefig(os.path.join(results_dir, "fig_{}_multi_data_fits_text_{}.png".format(dv, text)), dpi=300)
     plt.show()
     plt.close(f)
 
 
-def fig_scale_params_depth(dv, ylim, text=True, palette="crest", agg="max"):
+def fig_scale_params_depth(dv, ylim, text=True, palette="crest", agg="max", data="all"):
     f, axs = plt.subplots(1, 1)
+    if data.lower() == "cp":
+        df = cp_df
     if text:
-        plt.text(df.params.min() + 50000, cp_data[dv].values + 1, "Recursion (Cellprofiler)")
+        if data.lower() != "cp":
+            plt.text(df.params.min() + 50000, cp_data[dv].values + 1, "Recursion (Cellprofiler)")
         sns.lineplot(data=df, x="params", y=dv, hue="layers", palette="viridis", estimator=agg)
     else:
         sns.lineplot(data=df, x="params", y=dv, hue="layers", palette="viridis", estimator=agg, legend=False)
-        plt.axhline(cp_data[dv].values, color="black", linestyle='--', lw=1)
-        plt.axhline(cp_df[dv].max(), color="black", linestyle='--', lw=1)
-        rect = plt.Rectangle((df.params.min(), cp_data[dv].values.tolist()[0]), (df.params.max() - df.params.min()), (cp_df[dv].max() - cp_data[dv].values)[0], color='black', alpha=0.05)
-        axs.add_patch(rect)
+        if data.lower() != "cp":
+            plt.axhline(cp_data[dv].values, color="black", linestyle='--', lw=1)
+            plt.axhline(cp_df[dv].max(), color="black", linestyle='--', lw=1)
+            rect = plt.Rectangle((df.params.min(), cp_data[dv].values.tolist()[0]), (df.params.max() - df.params.min()), (cp_df[dv].max() - cp_data[dv].values)[0], color='black', alpha=0.05)
+            axs.add_patch(rect)
 
-    rd = df.groupby(["layers"]).max().reset_index()
-    X = np.stack((rd.total_data.values, rd.label_prop.values), 1)
-    rd["adj_labels"]=(rd.total_data - 118949)
-    # m = sm.ols(formula="target_acc ~ adj_labels", data=rd).fit()
-    # intercept = m.params.Intercept
-    # slope = m.params.adj_labels
+    if agg != "max":
+        v = df.groupby(["params", "layers"]).agg(agg).reset_index()[dv]
+        rd = df.groupby(["params", "layers"]).agg("max").reset_index()
+        rd[dv] = v
+    else:
+        rd = df.groupby(["params", "layers"]).agg(agg).reset_index()
+    m = sm.ols(formula="{} ~ params".format(dv), data=rd).fit()
+    intercept = m.params.Intercept
+    slope = m.params.params
 
-    # slope, intercept, r_value, p_value, std_err = linregress(rd.label_prop, rd.target_acc)
-    # final_predicted = slope * (rd.adj_labels.max() + 800000) + intercept
-    # plt.plot([df.params.min(), rd.adj_labels.max() + 800000], [intercept, final_predicted], color="#c90657", linestyle="-", lw=1, alpha=0.5)
-    # rd.total_data, y_predicted, "k--")
+    print("Accuracy = {:.2e} * (# of Novel Molecules) + {:.2f}".format(Decimal(slope), intercept))
+    final_predicted = slope * (rd.params.max()) + intercept
+    plt.plot([rd.params.min(), rd.params.max()], [intercept, final_predicted], color="#c90657", linestyle="-", lw=1, alpha=0.5)
 
     chance = 100 * (1/1282.)
     # if text:
@@ -116,6 +195,59 @@ def fig_scale_params_depth(dv, ylim, text=True, palette="crest", agg="max"):
     axs.spines['top'].set_visible(False)
     axs.spines['right'].set_visible(False)
     plt.savefig(os.path.join(results_dir, "fig_{}_scale_params_depth_text_{}.png".format(dv, text)), dpi=300)
+    plt.show()
+    plt.close(f)
+
+
+def fig_scale_data_data_fits(dv, ylim, text=True, agg="max", data="all"):
+    f, axs = plt.subplots(1, 1)
+    if data.lower() == "cp":
+        df = cp_df
+    if text:
+        if data.lower() != "cp":
+            plt.text(50000, cp_data[dv].values + 1, "Recursion (Cellprofiler)")
+        sns.lineplot(data=df, x="total_data", y=dv, hue="data_prop", palette=palette, ax=axs, estimator=agg, alpha=0.2)
+    else:
+        sns.lineplot(data=df, x="total_data", y=dv, hue="data_prop", palette=palette, ax=axs, estimator=agg, legend=False, alpha=0.2)
+
+    if agg != "max":
+        v = df.groupby(["label_prop", "data_prop"]).agg(agg).reset_index()[dv]
+        rd = df.groupby(["label_prop", "data_prop"]).agg("max").reset_index()
+        rd[dv] = v
+    else:
+        rd = df.groupby(["label_prop", "data_prop"]).agg(agg).reset_index()
+    X = np.stack((rd.total_data.values, rd.label_prop.values), 1)
+    # rd["adj_labels"]=(rd.total_data - 118949)
+    rd["adj_labels"] = rd.total_data
+
+    # Seperate fits for each data_prop
+    fits = {}
+    for d in np.sort(rd.data_prop.unique()):
+        m = sm.ols(formula="{} ~ adj_labels".format(dv), data=rd[rd.data_prop == d]).fit()
+        intercept = m.params.Intercept
+        slope = m.params.adj_labels
+        fits[d] = [intercept, slope]
+        print("Accuracy = {:.2e} * (# of Novel Molecules) + {:.2f}".format(Decimal(slope), intercept))
+        final_predicted = slope * (rd[rd.data_prop == d].adj_labels.max() + 800000) + intercept
+        plt.plot([0, rd[rd.data_prop == d].adj_labels.max() + 800000], [intercept, final_predicted], color="#c90657", linestyle="-", lw=1, alpha=0.5)
+
+    # chance = 100 * (1/1282.)
+    # plt.axhline(chance, color="black", linestyle='--', lw=1, alpha=0.5)
+    # plt.text(50000, chance + 1, "Chance")
+    # plt.annotate("$Accuracy = {:.2e} * (# of Novel Molecules) + {:.2f}$".format(Decimal(slope)), xy=(50000, 75))
+    plt.xlim([0, 800000])
+    plt.ylim(ylim)
+    if text:
+        plt.legend(loc='center right')
+    plt.ylabel("{} deconvolution accuracy".format(dv))
+    plt.xlabel("Total number of training phenotypes")
+    plt.xticks(rotation = -30)
+    axs.spines['top'].set_visible(False)
+    axs.spines['right'].set_visible(False)
+    if data.lower() == "cp":
+        plt.savefig(os.path.join(results_dir, "fig_{}_multi_data_fits_text_{}.png".format(dv, text)), dpi=300)
+    else:
+        plt.savefig(os.path.join(results_dir, "fig_{}_multi_data_fits_text_{}.png".format(dv, text)), dpi=300)
     plt.show()
     plt.close(f)
 
@@ -150,6 +282,7 @@ re_min, re_max = df.rediscovery_acc.min() - 0.05, df.rediscovery_acc.max() + 0.0
 orf_min, orf_max = df.d_orf.min() - 0.02, df.d_orf.max() + 0.02
 crispr_min, crispr_max = df.d_crispr.min() - 0.02, df.d_crispr.max() + 0.02
 task_min, task_max = 5, df.task_loss.max() + 1
+df.sort_values("task_loss")
 
 cp_data = df[df.cell_profiler]
 df = df[~df.cell_profiler]
@@ -169,7 +302,6 @@ import matplotlib.cm as cm
 
 # fig_scale_data_labels(dv="moa_acc", ylim=[20, 55])
 # fig_scale_data_labels(dv="moa_acc", ylim=[20, 55], text=False)
-# fig_scale_params_depth(dv="moa_acc", ylim=[20, 55])
 # fig_scale_params_depth(dv="moa_acc", ylim=[20, 55], text=False)
 
 # fig_scale_data_labels(dv="target_loss", ylim=[3.5, 7.3], agg="min")
@@ -183,9 +315,28 @@ import matplotlib.cm as cm
 # fig_scale_data_labels(dv="z_prime_orf", ylim=[3.5, 7.3], agg="min")
 
 # fig_scale_data_labels(dv="target_loss", ylim=[3.5, 7.3], text=False, agg="min")
-fig_scale_data_labels(dv="target_loss", ylim=[3.5, 7.3], text=True, agg="min")
-fig_scale_params_depth(dv="target_loss", ylim=[3.5, 7.3], agg="min")
-fig_scale_params_depth(dv="target_loss", ylim=[3.5, 7.3], text=False, agg="min")
+# fig_scale_data_labels(dv="target_loss", ylim=[3.5, 7.3], text=True, agg="min", powerlaw=False)
+# fig_scale_params_depth(dv="target_loss", ylim=[3.5, 7.3], agg="min")
+# fig_scale_params_depth(dv="target_loss", ylim=[3.5, 7.3], text=False, agg="min")
+
+# fig_scale_data_fits(dv="moa_acc", ylim=[20, 55], agg="max")
+# fig_scale_data_fits(dv="moa_acc", ylim=[20, 55], agg="max", text=False)
+
+# CP figs
+# fig_scale_data_fits(dv="moa_acc", ylim=[20, 55], agg="max", data="cp")
+# fig_scale_data_fits(dv="moa_acc", ylim=[20, 55], agg="max", text=False, data="cp")
+# fig_scale_params_depth(dv="moa_acc", ylim=[20, 55], text=False, data="cp")
+# fig_scale_data_labels(dv="moa_acc", ylim=[20, 55], data="cp")
+# fig_scale_data_labels(dv="moa_acc", ylim=[20, 55], data="cp", text=False)
+
+fig_scale_data_data_fits(dv="moa_acc", ylim=[20, 55], agg="max")
+plt.subplot(121)
+dv = "moa_acc"
+sns.lineplot(data=df, x="total_data", y=dv, hue="label_prop", palette=palette)
+plt.subplot(122)
+sns.lineplot(data=df, x="total_data", y=dv, hue="data_prop", palette=palette)
+plt.show()
+os._exit(1)
 
 
 # Data vs target

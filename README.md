@@ -3,11 +3,11 @@ The goal of this repo is to systematically search through architecture, data, an
 
 # How to run
 
-1. Create a database of hyperparameters `python generate_db.py`
+0. Create databases sudo -u postgres psql -c 'create database exp_accs;'
+1. Build a database of hyperparameters `python generate_db.py`
 2. Launch workers with `bash run_worker.sh`
 3. Pull db data down to plot and analyze it with `python analyze_db.py`.
-
-4. Create CP database `python generate_db.py --cp --recreate`
+4. Build CP database `python generate_db.py --cp --recreate`
 
 # Dump a db
 pg_dump chem_exps > dump_finished-mol-v2.sql
